@@ -44,6 +44,7 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 .presets{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .presets button{padding:5px 10px;font-weight:500}
 .presets button.active{background:var(--accent);color:#fff}
+.linkbtn{background:none;border:0;padding:0;color:var(--accent);font-size:12px;font-weight:600;text-decoration:underline;cursor:pointer}
 .toggle{display:inline-flex;border:1px solid var(--accent);border-radius:8px;overflow:hidden}
 .toggle button{background:transparent;color:var(--accent);border:0;border-radius:0;padding:5px 12px;font-weight:600}
 .toggle button.on{background:var(--accent);color:#fff}
@@ -104,6 +105,7 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
         </label>
         <div style="display:flex;gap:8px;align-items:end">
           <button type="submit">Save &amp; update</button>
+          <button type="button" class="secondary" id="restoreAll" hidden>↺ Restore all from SolaX</button>
         </div>
       </form>
     </details>
@@ -241,20 +243,39 @@ function fillForm(){
   for (const k of ["postcode","region","cheap","solarKwp","batteryKwh","chargeKw","reservePct","dailyKwh"]) f.elements[k].value = S[k];
   const lf = $("loadForm").elements;
   for (const k of ["blockHours","loadKw","finishBy"]) lf[k].value = S[k] ?? "";
-  for (const k of Object.keys(AUTO_KEYS)){
-    const label = f.elements[k].parentElement;
-    let h = label.querySelector(".hint");
-    if (!h){ h = document.createElement("span"); h.className = "hint"; h.style.cssText = "font-size:12px;color:var(--accent)"; label.appendChild(h); }
-    const sv = PROFILE ? PROFILE[AUTO_KEYS[k]] : null;
-    const has = sv !== null && sv !== undefined;
-    h.textContent = S.manual[k]
-      ? (has && round1(sv) !== S[k] ? `✓ Your value (saved) · SolaX says ${round1(sv)} – clear box to use it` : "✓ Your value (saved)")
-      : has ? "✓ From SolaX" : "";
-  }
+  renderHints();
   if (PROFILE && PROFILE.lat !== null && !S.postcode) f.elements.postcode.placeholder = "Using your SolaX system's location";
   if (!S.postcode && !PROFILE) $("settingsBox").open = true;
 }
 const round1 = v => Math.round(v*10)/10;
+const solaxValue = k => { const v = PROFILE ? PROFILE[AUTO_KEYS[k]] : null; return v === null || v === undefined ? null : round1(v); };
+
+// Under each SolaX-linked box: where the value comes from, and a button to
+// relink it to SolaX when the user has typed their own.
+function renderHints(){
+  const f = $("settings");
+  let restorable = 0;
+  for (const k of Object.keys(AUTO_KEYS)){
+    const label = f.elements[k].parentElement;
+    let h = label.querySelector(".hint");
+    if (!h){ h = document.createElement("span"); h.className = "hint"; h.style.cssText = "font-size:12px;color:var(--accent)"; label.appendChild(h); }
+    const sv = solaxValue(k);
+    if (S.manual[k] && sv !== null){
+      restorable++;
+      h.innerHTML = `✓ Your value (saved) · <button type="button" class="linkbtn" data-restore="${k}">↺ Use SolaX value (${sv})</button>`;
+    } else h.textContent = S.manual[k] ? "✓ Your value (saved)" : sv !== null ? "✓ From SolaX" : "";
+  }
+  $("restoreAll").hidden = restorable < 2;
+}
+
+function restoreFromSolax(keys){
+  const f = $("settings").elements;
+  for (const k of keys){
+    const sv = solaxValue(k); if (sv === null) continue;
+    S.manual[k] = false; S[k] = sv; f[k].value = sv; EDITED.delete(k);
+  }
+  saveSettings(S); renderHints(); run();
+}
 
 async function applyProfile(prof){
   if (!prof) return;
@@ -971,6 +992,11 @@ $("settings").addEventListener("submit", async ev=>{
 });
 const EDITED = new Set();
 $("settings").addEventListener("input", e => { if (e.target.name) EDITED.add(e.target.name); });
+$("settings").addEventListener("click", e => {
+  const b = e.target.closest("button[data-restore]");
+  if (b){ e.preventDefault(); restoreFromSolax([b.dataset.restore]); }
+});
+$("restoreAll").addEventListener("click", () => restoreFromSolax(Object.keys(AUTO_KEYS).filter(k => S.manual[k])));
 $("refresh").addEventListener("click", run);
 
 fillForm(); initHp(); run();
