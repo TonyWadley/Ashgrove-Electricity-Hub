@@ -74,19 +74,19 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
           </select>
         </label>
         <label>Cheap threshold (p/kWh)
-          <input name="cheap" type="number" step="0.5">
+          <input name="cheap" type="number" step="any">
         </label>
         <label>Solar size (kWp, 0 if none)
-          <input name="solarKwp" type="number" min="0" step="0.1">
+          <input name="solarKwp" type="number" min="0" step="any">
         </label>
         <label>Battery usable size (kWh, 0 if none)
-          <input name="batteryKwh" type="number" min="0" step="0.1">
+          <input name="batteryKwh" type="number" min="0" step="any">
         </label>
         <label>Battery charge rate (kW)
-          <input name="chargeKw" type="number" min="0" step="0.1">
+          <input name="chargeKw" type="number" min="0" step="any">
         </label>
         <label>Typical daily use (kWh)
-          <input name="dailyKwh" type="number" min="0" step="0.5">
+          <input name="dailyKwh" type="number" min="0" step="any">
         </label>
         <div style="display:flex;gap:8px;align-items:end">
           <button type="submit">Save &amp; update</button>
@@ -120,7 +120,7 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
         <input name="blockHours" type="number" min="0.5" max="24" step="0.5" required>
       </label>
       <label>Power (kW) – optional, for cost
-        <input name="loadKw" type="number" min="0" step="0.1" placeholder="e.g. 7 for an EV">
+        <input name="loadKw" type="number" min="0" step="any" placeholder="e.g. 7 for an EV">
       </label>
       <label>Must finish by – optional
         <input name="finishBy" type="time" step="1800">
