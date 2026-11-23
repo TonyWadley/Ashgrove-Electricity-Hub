@@ -195,7 +195,7 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 
   <section class="card">
     <h2>Recommendations</h2>
-    <ul class="advice" id="advice"></ul>
+    <div class="advice" id="advice"></div>
   </section>
 
   <section class="card">
@@ -414,8 +414,12 @@ function analyse(slots, weather){
   const avg = slots.reduce((a,s)=>a+s.price,0)/slots.length;
   const min = slots.reduce((a,s)=>s.price<a.price?s:a);
   const max = slots.reduce((a,s)=>s.price>a.price?s:a);
-  const advice = [];
   const L = LIVE && LIVE.ok ? LIVE : null;
+  const todayKey = dayKey(new Date()), tomorrowKey = dayKey(new Date(Date.now()+86400e3));
+  const day = { today: [], tomorrow: [] };
+  const whichDay = d => dayKey(d) === todayKey ? "today" : "tomorrow";
+  const advice = { push: x => day.today.push(x) }; // "right now" items belong to today
+  const byDay = list => ({ today: list.filter(s => dayKey(s.start) === todayKey), tomorrow: list.filter(s => dayKey(s.start) !== todayKey) });
 
   // Right-now advice from the live system
   if (L && L.gridW !== null){
@@ -425,15 +429,34 @@ function analyse(slots, weather){
     else if (L.gridW > 500 && nowB !== "peak") advice.push(`<span class="pill" style="background:var(--cheap)">NOW</span> You're exporting ${kw(L.gridW)} of spare solar — a good moment to run appliances for free.`);
   }
 
-  const tomorrowKey = dayKey(new Date(Date.now()+86400e3));
+  if (L && L.soc !== null){
+    const battNow = S.batteryKwh || L.batteryCapacityKwh || 0;
+    day.today.push(`Battery is at <b>${Math.round(L.soc)}%</b>${battNow ? ` (~${(battNow*L.soc/100).toFixed(1)} kWh of ${battNow} kWh)` : ""} right now.`);
+  }
+
   const hasTomorrow = slots.some(s=>dayKey(s.start)===tomorrowKey && fmtTime(s.start)==="22:30");
-  if (!hasTomorrow) advice.push(`<b>Tomorrow's full prices aren't published yet</b> — Octopus usually releases them around 4pm. Advice below covers the slots available so far; refresh after 4pm.`);
 
-  // Plunge pricing
-  const neg = slots.filter(s=>s.price<0);
-  if (neg.length) advice.push(`<span class="pill" style="background:var(--plunge)">PLUNGE</span> You get <b>paid</b> to import during: ${groupRuns(neg).map(rangeText).join(", ")}. Run everything you can and charge any battery/EV.`);
+  // Price bands, split by day: plunge, cheap, avoid
+  for (const [d, list] of Object.entries(byDay(slots))){
+    if (!list.length) continue;
+    const neg = list.filter(s=>s.price<0);
+    if (neg.length) day[d].push(`<span class="pill" style="background:var(--plunge)">PLUNGE</span> You get <b>paid</b> to import during ${groupRuns(neg).map(r=>`${fmtTime(r.start)}–${fmtTime(r.end)}`).join(", ")}. Run everything you can and charge any battery/EV.`);
+    const cheap = list.filter(s=>s.price>=0 && s.price<=S.cheap);
+    const lo = list.reduce((a,s)=>s.price<a.price?s:a);
+    if (cheap.length) day[d].push(`<span class="pill" style="background:var(--cheap)">CHEAP</span> ≤ ${S.cheap}p: ${groupRuns(cheap).map(r=>`${fmtTime(r.start)}–${fmtTime(r.end)} (from ${p(Math.min(...r.prices))})`).join("; ")}.`);
+    else day[d].push(`No slots at or below your ${S.cheap}p cheap threshold${d==="today" ? " for the rest of today" : ""} — the lowest is ${p(lo.price)} at ${fmtTime(lo.start)}.`);
+    const peak = list.filter(s=>band(s.price,avg)==="peak");
+    if (peak.length) day[d].push(`<span class="pill" style="background:var(--peak)">AVOID</span> ${groupRuns(peak).map(r=>`${fmtTime(r.start)}–${fmtTime(r.end)} (up to ${p(Math.max(...r.prices))})`).join("; ")}.`);
+  }
 
-  // Cheapest block for long loads
+  // Imports from "Plan your import", under the day each one happens
+  if (LAST_PLAN){
+    if (!LAST_PLAN.runs.length) day.today.push(`🔋 No import needed — your battery${S.solarKwp>0?" and solar":""} cover the house until ${fmtDay(slots.at(-1).end)} ${fmtTime(slots.at(-1).end)}, the last published price (see <b>Plan your import</b>).`);
+    for (const r of LAST_PLAN.runs){
+      const what = [r.chg > 0.05 ? "charge the battery" : "", r.dir > 0.05 ? "run the house from the grid" : ""].filter(Boolean).join(" and ");
+      day[whichDay(r.start)].push(`🔌 Import ${fmtTime(r.start)}–${fmtTime(r.end)}: ${kwhTxt(r.kwh)} at avg ${p(r.avgP)} to ${what} (see <b>Plan your import</b>).`);
+    }
+  }
 
   // Weather / solar
   const tomorrowWx = weather.filter(w=>dayKey(w.time)===tomorrowKey);
@@ -449,44 +472,19 @@ function analyse(slots, weather){
     let wx = `Tomorrow's weather: <b>${sky}</b>, avg ${avgT.toFixed(1)}°C (low ${minT.toFixed(1)}°C), daytime cloud ${Math.round(avgCloud)}%.`;
     if (S.solarKwp > 0) wx += ` Estimated solar generation ≈ <b>${solarKwh.toFixed(1)} kWh</b> from your ${S.solarKwp} kWp.`;
     if (minT < 3) wx += ` It's cold — expect higher demand if you heat electrically; pre-heat during cheap slots.`;
-    advice.push(wx);
+    const battKwh = S.batteryKwh || (L && L.batteryCapacityKwh) || 0;
+    if (S.solarKwp > 0 && battKwh > 0 && solarKwh > battKwh*0.5) wx += ` Good solar — leave room in the battery to soak up free daytime generation.`;
+    day.tomorrow.unshift(wx);
   }
+  if (!hasTomorrow) day.tomorrow.unshift(`<b>Tomorrow's prices aren't published yet</b> — Octopus usually releases them around 4pm. Refresh after 4pm for tomorrow's cheap and expensive times.`);
 
-  // Battery charging plan
-  const battKwh = S.batteryKwh || (L && L.batteryCapacityKwh) || 0;
-  if (battKwh > 0 && S.chargeKw > 0){
-    // Solar covers part of the day's use; battery need = min(capacity, daily use - usable solar)
-    const solarUseful = Math.min(solarKwh, S.dailyKwh*0.6);
-    let need = Math.max(0, Math.min(battKwh, S.dailyKwh - solarUseful));
-    if (L && L.soc !== null){
-      // Assume the battery keeps ~half its current charge until the cheap slots arrive
-      const stored = battKwh * L.soc/100;
-      const kept = stored * 0.5;
-      need = Math.max(0, need - kept);
-      advice.push(`Battery is at <b>${Math.round(L.soc)}%</b> (~${stored.toFixed(1)} kWh of ${battKwh} kWh) right now.`);
-    }
-    const slotsNeeded = Math.ceil(need / (S.chargeKw*0.5));
-    const pick = [...slots].sort((a,b)=>a.price-b.price).slice(0, slotsNeeded);
-    if (need < 0.5) advice.push(`Battery: solar should cover tomorrow — <b>no need to grid-charge</b> (unless prices go negative).`);
-    else {
-      const avgPick = pick.reduce((a,s)=>a+s.price,0)/pick.length;
-      advice.push(`Battery: charge about <b>${need.toFixed(1)} kWh</b> (${slotsNeeded} half-hour slots at ${S.chargeKw} kW)` +
-        (S.solarKwp>0 ? `, allowing for ~${solarUseful.toFixed(1)} kWh of solar` : "") +
-        `. Cheapest slots: <b>${groupRuns(pick).map(rangeText).join(", ")}</b> (avg ${p(avgPick)}).`);
-      if (S.solarKwp>0 && solarKwh > battKwh) advice.push(`Strong solar tomorrow — consider only a partial overnight charge so the battery has room to absorb free daytime generation.`);
-    }
-  }
+  return { avg, min, max, day, solarKwh };
+}
 
-  // Cheap slots summary
-  const cheap = slots.filter(s=>s.price>=0 && s.price<=S.cheap);
-  if (cheap.length) advice.push(`<span class="pill" style="background:var(--cheap)">CHEAP</span> ≤ ${S.cheap}p periods: ${groupRuns(cheap).map(r=>`${rangeText(r)} (from ${p(Math.min(...r.prices))})`).join("; ")}.`);
-  else advice.push(`No slots at or below your ${S.cheap}p cheap threshold — the lowest is ${p(min.price)} at ${fmtDay(min.start)} ${fmtTime(min.start)}.`);
-
-  // Avoid
-  const peak = slots.filter(s=>band(s.price,avg)==="peak");
-  if (peak.length) advice.push(`<span class="pill" style="background:var(--peak)">AVOID</span> ${groupRuns(peak).map(r=>`${rangeText(r)} (up to ${p(Math.max(...r.prices))})`).join("; ")}.`);
-
-  return { avg, min, max, advice, solarKwh };
+function renderAdvice(day){
+  const sec = (title, items) => items.length ? `<h3 style="margin:4px 0 2px;font-size:15px">${title}</h3><ul>${items.map(x=>`<li>${x}</li>`).join("")}</ul>` : "";
+  $("advice").innerHTML = sec(`Today · ${fmtDay(new Date())}`, day.today)
+    + sec(`Tomorrow · ${fmtDay(new Date(Date.now()+86400e3))}`, day.tomorrow);
 }
 
 function renderChart(slots, weather, avg){
@@ -586,11 +584,14 @@ function solveImport(slots, opt, simple=false){
   return { dir, chg, soc, cost, kwh: dir.reduce((a,b)=>a+b,0) + chg.reduce((a,b)=>a+b,0) };
 }
 
+let LAST_PLAN = null; // import windows, shared with the Recommendations list
+
 function renderImport(){
   const out = $("importResult"), slots = LAST_SLOTS;
   if (!slots) return;
   const L = LIVE && LIVE.ok ? LIVE : null;
   const cap = S.batteryKwh || (L && L.batteryCapacityKwh) || 0;
+  LAST_PLAN = null;
   if (!cap){ out.innerHTML = `<span class="muted">Add your battery size in Settings to get an import plan. Without a battery, you import whenever you use power — use <b>Plan a load</b> below to move appliances to cheap times.</span>`; return; }
   const n = slots.length;
   const load = slots.map(s => S.dailyKwh * HOUR_PROFILE[+fmtTime(s.start).slice(0,2)] / PROFILE_SUM / 2);
@@ -610,6 +611,7 @@ function renderImport(){
     if (last && last.endK === k-1){ last.endK = k; last.kwh += imp; last.p += imp*slots[k].price; last.chg += plan.chg[k]; last.dir += plan.dir[k]; }
     else runs.push({ startK:k, endK:k, kwh:imp, p:imp*slots[k].price, chg:plan.chg[k], dir:plan.dir[k] });
   }
+  LAST_PLAN = { runs: runs.map(r => ({ start:slots[r.startK].start, end:slots[r.endK].end, kwh:r.kwh, avgP:r.p/r.kwh, chg:r.chg, dir:r.dir })) };
 
   let html = "";
   if (socPct === null) html += `<div class="muted" style="font-size:13px;margin-bottom:8px">Live battery level not available — assuming 50%.</div>`;
@@ -947,8 +949,8 @@ async function run(){
     if (live && live.ok) await applyProfile(live.profile);
     renderLive(live, slots[0].price);
     if (live && live.ok){ TODAY = await fetchToday(S.region); renderCost(); }
-    const a = analyse(slots, weather);
     LAST_SLOTS = slots; LAST_WEATHER = weather; renderImport(); renderLoad(); renderHp();
+    const a = analyse(slots, weather);
     const now = slots[0];
     $("stats").innerHTML = [
       ["Now", p(now.price), `${fmtTime(now.start)}–${fmtTime(now.end)}`],
@@ -956,7 +958,7 @@ async function run(){
       ["Most expensive", p(a.max.price), `${fmtDay(a.max.start)} ${fmtTime(a.max.start)}`],
       ["Average (upcoming)", p(a.avg), `${slots.length} half-hour slots`]
     ].map(([l,v,s])=>`<div class="card stat"><div class="l">${l}</div><div class="v">${v}</div><div class="muted">${s}</div></div>`).join("");
-    $("advice").innerHTML = a.advice.map(x=>`<li>${x}</li>`).join("");
+    renderAdvice(a.day);
     renderChart(slots, weather, a.avg);
     renderTable(slots, weather, a.avg);
     $("status").textContent = `Region ${S.region}${S.postcode?` · ${S.postcode.toUpperCase()}`:""} · prices to ${fmtDay(slots.at(-1).end)} ${fmtTime(slots.at(-1).end)} · updated ${new Date().toLocaleTimeString("en-GB",{timeZone:TZ})}`;
