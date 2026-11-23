@@ -96,6 +96,9 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
         <label>Battery charge rate (kW)
           <input name="chargeKw" type="number" min="0" step="any">
         </label>
+        <label>Battery reserve – never go below (%)
+          <input name="reservePct" type="number" min="0" max="90" step="any">
+        </label>
         <label>Typical daily use (kWh)
           <input name="dailyKwh" type="number" min="0" step="any">
         </label>
@@ -127,6 +130,12 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
   </section>
 
   <section class="grid" id="stats"></section>
+
+  <section class="card" id="importCard">
+    <h2>Plan your import</h2>
+    <div class="muted" style="font-size:13px">The cheapest times to import so your battery never drops below its reserve — based on your typical use, the solar forecast and published prices.</div>
+    <div id="importResult" style="margin-top:12px"></div>
+  </section>
 
   <section class="card" id="loadCard">
     <h2>Plan a load</h2>
@@ -211,7 +220,7 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 <script>
 const PRODUCT = "AGILE-24-10-01";
 const TZ = "Europe/London";
-const DEFAULTS = { postcode:"", region:"C", blockHours:3, loadKw:"", finishBy:"", cheap:15, solarKwp:0, batteryKwh:0, chargeKw:3, dailyKwh:10, lat:51.5074, lon:-0.1278 };
+const DEFAULTS = { postcode:"", region:"C", blockHours:3, loadKw:"", finishBy:"", cheap:15, solarKwp:0, batteryKwh:0, chargeKw:3, reservePct:10, dailyKwh:10, lat:51.5074, lon:-0.1278 };
 
 function loadSettings(){
   try { return {...DEFAULTS, ...JSON.parse(localStorage.getItem("agileAdvisor")||"{}")}; } catch { return {...DEFAULTS}; }
@@ -229,7 +238,7 @@ S.manual = S.manual || {};
 
 function fillForm(){
   const f = $("settings");
-  for (const k of ["postcode","region","cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) f.elements[k].value = S[k];
+  for (const k of ["postcode","region","cheap","solarKwp","batteryKwh","chargeKw","reservePct","dailyKwh"]) f.elements[k].value = S[k];
   const lf = $("loadForm").elements;
   for (const k of ["blockHours","loadKw","finishBy"]) lf[k].value = S[k] ?? "";
   for (const k of Object.keys(AUTO_KEYS)){
@@ -499,6 +508,113 @@ function renderTable(slots, weather, avg){
       <td>${w?w.temp.toFixed(1)+"°C":"–"}</td><td>${w?w.cloud+"%":"–"}</td><td>${w?Math.round(w.rad):"–"}</td></tr>`;
   }
   $("table").innerHTML = h+"</tbody>";
+}
+
+// ---------- Plan your import ----------
+// Typical UK household use by hour (relative weights): low overnight,
+// morning bump, evening peak. Scaled to the "typical daily use" setting.
+const HOUR_PROFILE = [3.0,2.5,2.2,2.0,2.0,2.4,3.5,5.0,5.0,4.5,4.2,4.2,4.2,4.0,4.0,4.5,5.5,6.5,6.8,6.2,5.5,4.8,4.0,3.5];
+const PROFILE_SUM = HOUR_PROFILE.reduce((a,b)=>a+b,0);
+const ETA = 0.9; // battery round-trip efficiency
+
+// Works out grid imports over the published price horizon so the battery never
+// drops below its reserve, at least cost. Every time the battery would fall short,
+// it buys that energy from the cheapest option available up to that point:
+//   • import directly at a slot where the battery would otherwise be discharging, or
+//   • charge the battery from the grid in an earlier slot (charge-rate limited, ÷ efficiency)
+// without ever overfilling the battery. `simple` = only import at the moment it's needed.
+function solveImport(slots, opt, simple=false){
+  const n = slots.length, {cap, reserve, rate, soc0, load, sol} = opt;
+  const dir = new Array(n).fill(0), chg = new Array(n).fill(0);
+  // Negative prices: you're paid to import, so charge flat out and run the house from the grid
+  if (!simple) slots.forEach((s,k) => { if (s.price < 0){ chg[k] = rate; dir[k] = Math.max(0, load[k]-sol[k]); } });
+  const traj = () => {
+    const soc = [soc0];
+    for (let k=0;k<n;k++){
+      const v = soc[k] + sol[k] - load[k] + dir[k] + ETA*chg[k];
+      soc.push(Math.min(cap, v));
+    }
+    return soc;
+  };
+  for (let iter=0; iter<2000; iter++){
+    const soc = traj();
+    let i = -1; for (let k=0;k<n;k++) if (soc[k+1] < reserve - 1e-6){ i = k; break; }
+    if (i < 0) break;
+    const short = reserve - soc[i+1];
+    let best = null;
+    for (let j = simple ? i : 0; j <= i; j++){
+      // headroom: energy added at j raises the battery level on every slot after j up to i
+      let room = Infinity; for (let k=j+1;k<=i;k++) room = Math.min(room, cap - soc[k]);
+      const deficit = load[j] - sol[j] - dir[j];
+      if (deficit > 1e-6){
+        const lim = Math.min(deficit, room);
+        if (lim > 1e-6 && (!best || slots[j].price < best.cost)) best = { j, kind:"dir", lim, cost:slots[j].price };
+      }
+      if (!simple || j === i){
+        const lim = Math.min((rate - chg[j]) * ETA, room);
+        const cost = slots[j].price / ETA;
+        if (lim > 1e-6 && (!best || cost < best.cost)) best = { j, kind:"chg", lim, cost };
+      }
+    }
+    if (!best) break;
+    const amt = Math.min(short, best.lim);
+    if (best.kind === "dir") dir[best.j] += amt; else chg[best.j] += amt / ETA;
+  }
+  const soc = traj();
+  const cost = slots.reduce((a,s,k)=>a + (dir[k]+chg[k])*s.price, 0);
+  return { dir, chg, soc, cost, kwh: dir.reduce((a,b)=>a+b,0) + chg.reduce((a,b)=>a+b,0) };
+}
+
+function renderImport(){
+  const out = $("importResult"), slots = LAST_SLOTS;
+  if (!slots) return;
+  const L = LIVE && LIVE.ok ? LIVE : null;
+  const cap = S.batteryKwh || (L && L.batteryCapacityKwh) || 0;
+  if (!cap){ out.innerHTML = `<span class="muted">Add your battery size in Settings to get an import plan. Without a battery, you import whenever you use power — use <b>Plan a load</b> below to move appliances to cheap times.</span>`; return; }
+  const n = slots.length;
+  const load = slots.map(s => S.dailyKwh * HOUR_PROFILE[+fmtTime(s.start).slice(0,2)] / PROFILE_SUM / 2);
+  const sol = slots.map(s => { const w = weatherAt(LAST_WEATHER, s.start); return w ? S.solarKwp * w.rad / 1000 * 0.8 / 2 : 0; });
+  const socPct = L && L.soc !== null ? L.soc : null;
+  const opt = { cap, reserve: cap * (S.reservePct ?? 10) / 100, rate: (S.chargeKw || 3) * 0.5,
+                soc0: cap * (socPct ?? 50) / 100, load, sol };
+  const plan = solveImport(slots, opt), simple = solveImport(slots, opt, true);
+  const pct = kwh => Math.round(kwh / cap * 100);
+
+  // Group consecutive importing slots into windows
+  const runs = [];
+  for (let k=0;k<n;k++){
+    const imp = plan.dir[k] + plan.chg[k];
+    if (imp < 0.05) continue;
+    const last = runs[runs.length-1];
+    if (last && last.endK === k-1){ last.endK = k; last.kwh += imp; last.p += imp*slots[k].price; last.chg += plan.chg[k]; last.dir += plan.dir[k]; }
+    else runs.push({ startK:k, endK:k, kwh:imp, p:imp*slots[k].price, chg:plan.chg[k], dir:plan.dir[k] });
+  }
+
+  let html = "";
+  if (socPct === null) html += `<div class="muted" style="font-size:13px;margin-bottom:8px">Live battery level not available — assuming 50%.</div>`;
+  if (!runs.length){
+    html += `<div class="loadbest">No import needed</div><div class="muted">Your battery${S.solarKwp>0?" and solar":""} should cover the house until ${fmtDay(slots.at(-1).end)} ${fmtTime(slots.at(-1).end)} without dropping below ${S.reservePct ?? 10}%.</div>`;
+  } else {
+    html += `<div class="loadbest">Import ${kwhTxt(plan.kwh)} for about ${money(plan.cost)}</div>`;
+    const saving = simple.cost - plan.cost;
+    html += `<div class="muted">Average ${p(plan.cost/plan.kwh)}/kWh${saving > 5 ? ` · <span class="save">saves ${money(saving)}</span> vs only importing when the battery runs low (${money(simple.cost)})` : ""}.</div>`;
+    html += `<div class="hp-out">` + runs.map(r => {
+      const s = slots[r.startK], e = slots[r.endK];
+      const what = [r.chg > 0.05 ? `charge battery (+${kwhTxt(r.chg*ETA)})` : "", r.dir > 0.05 ? `run the house from the grid (${kwhTxt(r.dir)})` : ""].filter(Boolean).join(" and ");
+      const neg = slots.slice(r.startK, r.endK+1).some(x => x.price < 0);
+      return `<div class="item"><b class="t">🔌 ${fmtDay(s.start)} ${fmtTime(s.start)}–${fmtTime(e.end)}${neg ? ` <span class="pill" style="background:var(--plunge)">PAID TO IMPORT</span>` : ""}</b>
+        ${kwhTxt(r.kwh)} at avg ${p(r.p/r.kwh)} (${money(r.p)}) — ${what}. Battery ${pct(plan.soc[r.startK])}% → ${pct(plan.soc[r.endK+1])}%.</div>`;
+    }).join("") + `</div>`;
+  }
+  // Where the battery does the work: expensive periods with no import
+  const avgAll = avgOf(slots, s=>s.price);
+  const covered = slots.filter((s,k) => band(s.price, avgAll) === "peak" && plan.dir[k] + plan.chg[k] < 0.05 && load[k] > sol[k]);
+  if (covered.length) html += `<div style="margin-top:10px">🔋 Battery covers the expensive ${groupRuns(covered).map(r=>`${fmtDay(r.start)} ${fmtTime(r.start)}–${fmtTime(r.end)}`).join(", ")} — don't import then.</div>`;
+  // Battery level through the plan, every ~3 hours
+  const marks = [0]; for (let k=6;k<n;k+=6) marks.push(k); if (marks.at(-1) !== n) marks.push(n);
+  html += `<div class="muted" style="font-size:13px;margin-top:10px">Battery: ` + marks.map(k => `${k===0?"now":fmtTime(k<n?slots[k].start:slots.at(-1).end)} ${pct(plan.soc[k])}%`).join(" → ") + `</div>`;
+  html += `<div class="muted" style="font-size:12px;margin-top:6px">Assumes ${S.dailyKwh} kWh/day typical use${S.solarKwp>0?`, ${S.solarKwp} kWp solar forecast`:""}, ${S.chargeKw || 3} kW charging, ${S.reservePct ?? 10}% reserve and ~10% battery losses. Plans to ${fmtDay(slots.at(-1).end)} ${fmtTime(slots.at(-1).end)} (the last published price)${slots.length < 40 ? " — tomorrow's prices usually arrive around 4pm, which may change the plan" : ""}.</div>`;
+  out.innerHTML = html;
 }
 
 // ---------- Plan a load ----------
@@ -811,7 +927,7 @@ async function run(){
     renderLive(live, slots[0].price);
     if (live && live.ok){ TODAY = await fetchToday(S.region); renderCost(); }
     const a = analyse(slots, weather);
-    LAST_SLOTS = slots; LAST_WEATHER = weather; renderLoad(); renderHp();
+    LAST_SLOTS = slots; LAST_WEATHER = weather; renderImport(); renderLoad(); renderHp();
     const now = slots[0];
     $("stats").innerHTML = [
       ["Now", p(now.price), `${fmtTime(now.start)}–${fmtTime(now.end)}`],
@@ -832,7 +948,7 @@ $("settings").addEventListener("submit", async ev=>{
   ev.preventDefault();
   const f = ev.target.elements;
   const next = {...S, manual:{...S.manual}};
-  for (const k of ["cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) next[k] = parseFloat(f[k].value)||0;
+  for (const k of ["cheap","solarKwp","batteryKwh","chargeKw","reservePct","dailyKwh"]) next[k] = parseFloat(f[k].value)||0;
   for (const [k, pk] of Object.entries(AUTO_KEYS)){
     const typed = String(f[k].value ?? "").trim();
     const sv = PROFILE ? PROFILE[pk] : null;
