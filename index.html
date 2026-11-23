@@ -18,7 +18,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-ap
 header{padding:20px 16px 8px;max-width:1100px;margin:0 auto;display:flex;flex-wrap:wrap;gap:12px;align-items:end;justify-content:space-between}
 h1{margin:0;font-size:22px}
 h2{margin:0 0 10px;font-size:16px}
-main{max-width:1100px;margin:0 auto;padding:8px 16px 40px;display:grid;gap:14px}
+main{max-width:1100px;margin:0 auto;padding:8px 16px 40px;display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
 .muted{color:var(--muted)}
 .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
@@ -109,11 +109,14 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
     <h2>Plan a load</h2>
     <div class="muted" style="font-size:13px">Enter how long it runs and I'll find the cheapest time to start it.</div>
     <div class="presets" id="presets">
-      <button type="button" class="secondary" data-h="4" data-kw="7">🚗 EV charge</button>
       <button type="button" class="secondary" data-h="2" data-kw="0.8">👕 Washing machine</button>
       <button type="button" class="secondary" data-h="2.5" data-kw="1.2">🍽️ Dishwasher</button>
       <button type="button" class="secondary" data-h="1.5" data-kw="2.5">🌀 Tumble dryer</button>
-      <button type="button" class="secondary" data-h="2" data-kw="3">🚿 Immersion</button>
+      <button type="button" class="secondary" id="otherToggle" aria-expanded="false">Other ▾</button>
+      <div class="presets" id="otherPresets" hidden style="flex-basis:100%;margin-top:0">
+        <button type="button" class="secondary" data-h="0" data-kw="7">🚗 EV charge</button>
+        <button type="button" class="secondary" data-h="0" data-kw="3">🚿 Immersion</button>
+      </div>
     </div>
     <form class="settings" id="loadForm" onsubmit="return false" style="margin-top:4px">
       <label>How long does it run? (hours)
@@ -499,9 +502,17 @@ $("loadForm").addEventListener("input", e => {
 });
 $("presets").addEventListener("click", e => {
   const b = e.target.closest("button"); if (!b) return;
+  if (b.id === "otherToggle"){
+    const box = $("otherPresets"); box.hidden = !box.hidden;
+    b.setAttribute("aria-expanded", String(!box.hidden));
+    b.textContent = box.hidden ? "Other ▾" : "Other ▴";
+    return;
+  }
   S.blockHours = parseFloat(b.dataset.h); S.loadKw = b.dataset.kw;
   const f = $("loadForm").elements; f.blockHours.value = S.blockHours; f.loadKw.value = S.loadKw;
   saveSettings(S); renderLoad();
+  // EV and immersion start at 0 hours: put the cursor in the hours box to fill in
+  if (!S.blockHours){ f.blockHours.focus(); f.blockHours.select(); }
 });
 
 async function run(){
