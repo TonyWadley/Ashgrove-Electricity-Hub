@@ -40,6 +40,10 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 .legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin-top:6px}
 .legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;background:var(--c)}
 .err{color:var(--peak)}
+.presets{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.presets button{padding:5px 10px;font-weight:500}
+.loadbest{font-size:20px;font-weight:650}
+.save{color:var(--cheap);font-weight:600}
 </style>
 </head>
 <body>
@@ -68,9 +72,6 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
             <option value="L">L – South West</option><option value="M">M – Yorkshire</option>
             <option value="N">N – South Scotland</option><option value="P">P – North Scotland</option>
           </select>
-        </label>
-        <label>Long load duration (hours) – EV, washing, etc.
-          <input name="blockHours" type="number" min="0.5" max="12" step="0.5">
         </label>
         <label>Cheap threshold (p/kWh)
           <input name="cheap" type="number" step="0.5">
@@ -104,6 +105,30 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 
   <section class="grid" id="stats"></section>
 
+  <section class="card" id="loadCard">
+    <h2>Plan a load</h2>
+    <div class="muted" style="font-size:13px">Enter how long it runs and I'll find the cheapest time to start it.</div>
+    <div class="presets" id="presets">
+      <button type="button" class="secondary" data-h="4" data-kw="7">🚗 EV charge</button>
+      <button type="button" class="secondary" data-h="2" data-kw="0.8">👕 Washing machine</button>
+      <button type="button" class="secondary" data-h="2.5" data-kw="1.2">🍽️ Dishwasher</button>
+      <button type="button" class="secondary" data-h="1.5" data-kw="2.5">🌀 Tumble dryer</button>
+      <button type="button" class="secondary" data-h="2" data-kw="3">🚿 Immersion</button>
+    </div>
+    <form class="settings" id="loadForm" onsubmit="return false" style="margin-top:4px">
+      <label>How long does it run? (hours)
+        <input name="blockHours" type="number" min="0.5" max="24" step="0.5" required>
+      </label>
+      <label>Power (kW) – optional, for cost
+        <input name="loadKw" type="number" min="0" step="0.1" placeholder="e.g. 7 for an EV">
+      </label>
+      <label>Must finish by – optional
+        <input name="finishBy" type="time" step="1800">
+      </label>
+    </form>
+    <div id="loadResult" style="margin-top:12px"></div>
+  </section>
+
   <section class="card">
     <h2>Recommendations</h2>
     <ul class="advice" id="advice"></ul>
@@ -133,7 +158,7 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 <script>
 const PRODUCT = "AGILE-24-10-01";
 const TZ = "Europe/London";
-const DEFAULTS = { postcode:"", region:"C", blockHours:3, cheap:15, solarKwp:0, batteryKwh:0, chargeKw:3, dailyKwh:10, lat:51.5074, lon:-0.1278 };
+const DEFAULTS = { postcode:"", region:"C", blockHours:3, loadKw:"", finishBy:"", cheap:15, solarKwp:0, batteryKwh:0, chargeKw:3, dailyKwh:10, lat:51.5074, lon:-0.1278 };
 
 function loadSettings(){
   try { return {...DEFAULTS, ...JSON.parse(localStorage.getItem("agileAdvisor")||"{}")}; } catch { return {...DEFAULTS}; }
@@ -151,13 +176,18 @@ S.manual = S.manual || {};
 
 function fillForm(){
   const f = $("settings");
-  for (const k of ["postcode","region","blockHours","cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) f.elements[k].value = S[k];
+  for (const k of ["postcode","region","cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) f.elements[k].value = S[k];
+  const lf = $("loadForm").elements;
+  for (const k of ["blockHours","loadKw","finishBy"]) lf[k].value = S[k] ?? "";
   for (const k of Object.keys(AUTO_KEYS)){
     const label = f.elements[k].parentElement;
     let h = label.querySelector(".hint");
     if (!h){ h = document.createElement("span"); h.className = "hint"; h.style.cssText = "font-size:12px;color:var(--accent)"; label.appendChild(h); }
     const sv = PROFILE ? PROFILE[AUTO_KEYS[k]] : null;
-    h.textContent = sv === null || sv === undefined ? "" : S.manual[k] ? `Your value · SolaX says ${round1(sv)} (clear box to use it)` : "✓ From SolaX";
+    const has = sv !== null && sv !== undefined;
+    h.textContent = S.manual[k]
+      ? (has && round1(sv) !== S[k] ? `✓ Your value (saved) · SolaX says ${round1(sv)} – clear box to use it` : "✓ Your value (saved)")
+      : has ? "✓ From SolaX" : "";
   }
   if (PROFILE && PROFILE.lat !== null && !S.postcode) f.elements.postcode.placeholder = "Using your SolaX system's location";
   if (!S.postcode && !PROFILE) $("settingsBox").open = true;
@@ -317,9 +347,6 @@ function analyse(slots, weather){
   if (neg.length) advice.push(`<span class="pill" style="background:var(--plunge)">PLUNGE</span> You get <b>paid</b> to import during: ${groupRuns(neg).map(rangeText).join(", ")}. Run everything you can and charge any battery/EV.`);
 
   // Cheapest block for long loads
-  const n = Math.max(1, Math.round(S.blockHours*2));
-  const blk = cheapestBlock(slots, n);
-  if (blk) advice.push(`Best ${S.blockHours}h window for big loads (EV, washing, dishwasher, immersion): <b>${rangeText(blk)}</b>, averaging <b>${p(blk.avg)}</b>/kWh.`);
 
   // Weather / solar
   const tomorrowWx = weather.filter(w=>dayKey(w.time)===tomorrowKey);
@@ -417,6 +444,66 @@ function renderTable(slots, weather, avg){
   $("table").innerHTML = h+"</tbody>";
 }
 
+// ---------- Plan a load ----------
+let LAST_SLOTS = null;
+const pounds = pence => "£" + (pence/100).toFixed(2);
+
+function renderLoad(){
+  const out = $("loadResult"), slots = LAST_SLOTS;
+  if (!slots) return;
+  const hours = parseFloat(S.blockHours);
+  if (!hours || hours <= 0){ out.innerHTML = `<span class="muted">Enter how many hours it runs.</span>`; return; }
+  const n = Math.max(1, Math.round(hours*2));
+
+  // Deadline: the next time the clock (UK time) reaches "finish by"
+  let deadline = null, deadlineNote = "";
+  if (S.finishBy){
+    const [hh, mm] = S.finishBy.split(":").map(Number);
+    const target = `${String(hh).padStart(2,"0")}:${mm < 30 ? "00" : "30"}`;
+    const hit = slots.find(s => fmtTime(s.end) === target);
+    if (hit) deadline = hit.end;
+    else deadlineNote = `Prices up to ${target} aren't published yet, so this uses every slot available. Check again after 4pm.`;
+  }
+  const pool = deadline ? slots.filter(s => s.end <= deadline) : slots;
+  const blk = cheapestBlock(pool, n);
+  if (!blk){
+    out.innerHTML = `<span class="err">There aren't ${hours} hours of published prices${deadline ? ` before ${fmtTime(deadline)}` : ""}.</span>`;
+    return;
+  }
+  const nowBlk = cheapestBlock(slots.slice(0, n), n);
+  const kw = parseFloat(S.loadKw) || 0, kwh = kw * hours;
+  let html = `<div class="loadbest">Start ${fmtDay(blk.start)} at ${fmtTime(blk.start)}</div>
+    <div class="muted">Runs ${fmtTime(blk.start)}–${fmtTime(blk.end)} · average <b>${p(blk.avg)}</b>/kWh${deadline ? ` · finishes before ${fmtTime(deadline)}` : ""}</div>`;
+  if (kwh > 0){
+    html += `<div style="margin-top:6px">Cost ≈ <b>${pounds(kwh*blk.avg)}</b> for ${kwh.toFixed(1)} kWh`;
+    if (nowBlk && blk.start > slots[0].start){
+      const saving = kwh*(nowBlk.avg - blk.avg);
+      html += saving > 0.5 ? ` — <span class="save">saves ${pounds(saving)}</span> vs starting now (${pounds(kwh*nowBlk.avg)})` : ` — about the same as starting now`;
+    } else if (blk.start.getTime() === slots[0].start.getTime()) html += ` — <span class="save">now is the best time</span>`;
+    html += `</div>`;
+  } else if (nowBlk && blk.start > slots[0].start){
+    html += `<div style="margin-top:6px">That's <span class="save">${p(nowBlk.avg - blk.avg)}/kWh cheaper</span> than starting now. Add the power (kW) to see the cost in £.</div>`;
+  }
+  // Solar hint: daytime run on a sunny day
+  if (LIVE && LIVE.ok && S.solarKwp > 0) html += `<div class="muted" style="font-size:13px;margin-top:6px">Tip: if your solar is exporting at the time, running it then is effectively free.</div>`;
+  if (deadlineNote) html += `<div class="muted" style="font-size:13px;margin-top:6px">${deadlineNote}</div>`;
+  out.innerHTML = html;
+}
+
+$("loadForm").addEventListener("input", e => {
+  const f = $("loadForm").elements;
+  S.blockHours = parseFloat(f.blockHours.value) || 0;
+  S.loadKw = f.loadKw.value;
+  S.finishBy = f.finishBy.value;
+  saveSettings(S); renderLoad();
+});
+$("presets").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  S.blockHours = parseFloat(b.dataset.h); S.loadKw = b.dataset.kw;
+  const f = $("loadForm").elements; f.blockHours.value = S.blockHours; f.loadKw.value = S.loadKw;
+  saveSettings(S); renderLoad();
+});
+
 async function run(){
   $("status").textContent = "Loading prices and weather…";
   try{
@@ -426,6 +513,7 @@ async function run(){
     if (live && live.ok) await applyProfile(live.profile);
     renderLive(live, slots[0].price);
     const a = analyse(slots, weather);
+    LAST_SLOTS = slots; renderLoad();
     const now = slots[0];
     $("stats").innerHTML = [
       ["Now", p(now.price), `${fmtTime(now.start)}–${fmtTime(now.end)}`],
@@ -446,14 +534,15 @@ $("settings").addEventListener("submit", async ev=>{
   ev.preventDefault();
   const f = ev.target.elements;
   const next = {...S, manual:{...S.manual}};
-  for (const k of ["blockHours","cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) next[k] = parseFloat(f[k].value)||0;
+  for (const k of ["cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) next[k] = parseFloat(f[k].value)||0;
   for (const [k, pk] of Object.entries(AUTO_KEYS)){
-    const typed = f[k].value.trim();
+    const typed = String(f[k].value ?? "").trim();
     const sv = PROFILE ? PROFILE[pk] : null;
+    // Empty box → go back to the SolaX value; anything typed by hand is kept until changed
     if (typed === "" && sv !== null && sv !== undefined){ next.manual[k] = false; next[k] = round1(sv); }
-    else if (typed !== "" && parseFloat(typed) !== S[k]) next.manual[k] = !(sv !== null && sv !== undefined && parseFloat(typed) === round1(sv));
+    else if (typed !== "" && EDITED.has(k)) next.manual[k] = true;
   }
-  next.blockHours = next.blockHours || 3;
+  EDITED.clear();
   next.region = f.region.value;
   const pc = f.postcode.value.trim();
   if (pc && pc !== S.postcode){
@@ -466,6 +555,8 @@ $("settings").addEventListener("submit", async ev=>{
   next.postcode = pc;
   S = next; saveSettings(S); run();
 });
+const EDITED = new Set();
+$("settings").addEventListener("input", e => { if (e.target.name) EDITED.add(e.target.name); });
 $("refresh").addEventListener("click", run);
 
 fillForm(); run();

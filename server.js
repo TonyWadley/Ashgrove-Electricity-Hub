@@ -131,7 +131,8 @@ async function fetchLive({ raw = false } = {}) {
 
   return {
     ok: true,
-    plantName: inv.plant.plantName || null,
+    // SolaX often names the plant after the account email; don't show that on the page
+    plantName: inv.plant.plantName && !/@/.test(inv.plant.plantName) ? inv.plant.plantName : null,
     batteryCapacityKwh: num(inv.plant.batteryCapacity),
     pvCapacityKw: num(inv.plant.pvCapacity),
     dataTime: times.at(-1) || null,
