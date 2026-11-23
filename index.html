@@ -14,6 +14,8 @@
     --accent:#9b87ff; --cheap:#3cc483; --plunge:#4aa8ef; --mid:#e0bb45; --peak:#ef6a60; --sun:#ffbe3b; }
 }
 *{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;text-size-adjust:100%}
+.card,.advice li,.hp-out .item,#loadResult,#importResult{overflow-wrap:anywhere}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{padding:20px 16px 8px;max-width:1100px;margin:0 auto;display:flex;flex-wrap:wrap;gap:12px;align-items:end;justify-content:space-between}
 h1{margin:0;font-size:22px}
@@ -21,13 +23,15 @@ h2{margin:0 0 10px;font-size:16px}
 main{max-width:1100px;margin:0 auto;padding:8px 16px 40px;display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
 .muted{color:var(--muted)}
-.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr))}
 .stat .v{font-size:26px;font-weight:650}
 .stat .l{color:var(--muted);font-size:13px}
 details summary{cursor:pointer;font-weight:600}
-form.settings{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-top:12px}
+form.settings{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr));margin-top:12px}
 label{display:grid;gap:4px;font-size:13px;color:var(--muted)}
-input,select,button{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+input,select,button{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink);max-width:100%}
+/* 16px stops iPhones zooming the page when a box is tapped */
+input,select{font-size:16px;min-width:0}
 button{background:var(--accent);color:#fff;border:0;cursor:pointer;font-weight:600}
 button.secondary{background:transparent;color:var(--accent);border:1px solid var(--accent)}
 .advice li{margin:6px 0}
@@ -56,6 +60,18 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 .hp-out .item b.t{display:block}
 .loadbest{font-size:20px;font-weight:650}
 .save{color:var(--cheap);font-weight:600}
+@media (max-width:600px){
+  header{padding:14px 12px 6px}
+  h1{font-size:19px}
+  main{padding:6px 10px 30px;gap:10px}
+  .card{padding:12px}
+  .grid{gap:10px}
+  .stat .v{font-size:22px}
+  .loadbest{font-size:18px}
+  table{font-size:13px}
+  th,td{padding:5px 4px}
+  .wide-only{display:none}
+}
 </style>
 </head>
 <body>
@@ -487,8 +503,14 @@ function renderAdvice(day){
     + sec(`Tomorrow · ${fmtDay(new Date(Date.now()+86400e3))}`, day.tomorrow);
 }
 
+let LAST_CHART = null;
 function renderChart(slots, weather, avg){
-  const W = Math.max(720, slots.length*14), H = 260, pad = {l:36,r:10,t:12,b:34};
+  LAST_CHART = [slots, weather, avg];
+  // On phones, fit the chart to the screen instead of scrolling sideways
+  const avail = $("chart").parentElement.clientWidth || 720;
+  const narrow = avail < 600;
+  const W = narrow ? Math.max(200, avail) : Math.max(720, slots.length*14), H = narrow ? 220 : 260, pad = {l:32,r:6,t:12,b:34};
+  const labelEvery = narrow ? (slots.length > 48 ? 12 : 6) : 3; // hours between time labels
   const iw = W-pad.l-pad.r, ih = H-pad.t-pad.b;
   const lo = Math.min(0, ...slots.map(s=>s.price)), hi = Math.max(...slots.map(s=>s.price), 10);
   const y = v => pad.t + ih - (v-lo)/(hi-lo)*ih;
@@ -506,10 +528,10 @@ function renderChart(slots, weather, avg){
     const x = pad.l+i*bw, y0 = y(0), y1 = y(s.price);
     const w = weatherAt(weather, s.start);
     const tip = `${fmtDay(s.start)} ${fmtTime(s.start)} — ${p(s.price)}${w?` · ${w.temp.toFixed(1)}°C, ${w.cloud}% cloud`:""}`;
-    svg += `<rect x="${x+1}" y="${Math.min(y0,y1)}" width="${Math.max(1,bw-2)}" height="${Math.max(1,Math.abs(y1-y0))}" rx="2" fill="${COLORS[band(s.price,avg)]}"><title>${tip}</title></rect>`;
-    if (fmtTime(s.start).endsWith(":00") && (+fmtTime(s.start).slice(0,2))%3===0){
+    svg += `<rect x="${x+(bw>4?1:0)}" y="${Math.min(y0,y1)}" width="${Math.max(1,bw-(bw>4?2:0.5))}" height="${Math.max(1,Math.abs(y1-y0))}" rx="2" fill="${COLORS[band(s.price,avg)]}"><title>${tip}</title></rect>`;
+    if (fmtTime(s.start).endsWith(":00") && (+fmtTime(s.start).slice(0,2))%labelEvery===0){
       svg += `<text x="${x}" y="${H-pad.b+14}">${fmtTime(s.start)}</text>`;
-      if (fmtTime(s.start)==="00:00") svg += `<text x="${x}" y="${H-pad.b+27}" style="font-weight:600">${fmtDay(s.start)}</text><line x1="${x}" x2="${x}" y1="${pad.t}" y2="${pad.t+ih}" stroke="var(--muted)" stroke-dasharray="3 3"/>`;
+      if (fmtTime(s.start)==="00:00") svg += `<text x="${x}" y="${H-pad.b+27}" style="font-weight:600">${narrow ? s.start.toLocaleDateString("en-GB",{weekday:"short",timeZone:TZ}) : fmtDay(s.start)}</text><line x1="${x}" x2="${x}" y1="${pad.t}" y2="${pad.t+ih}" stroke="var(--muted)" stroke-dasharray="3 3"/>`;
     }
   });
   if (pts.length) svg += `<polyline points="${pts.join(" ")}" fill="none" stroke="var(--sun)" stroke-width="2" opacity=".85"/>`;
@@ -519,12 +541,12 @@ function renderChart(slots, weather, avg){
 }
 
 function renderTable(slots, weather, avg){
-  let h = `<thead><tr><th>Time</th><th>Price</th><th></th><th>Temp</th><th>Cloud</th><th>Sun W/m²</th></tr></thead><tbody>`;
+  let h = `<thead><tr><th>Time</th><th>Price</th><th></th><th>Temp</th><th class="wide-only">Cloud</th><th class="wide-only">Sun W/m²</th></tr></thead><tbody>`;
   for (const s of slots){
     const w = weatherAt(weather, s.start), b = band(s.price,avg);
-    h += `<tr><td>${fmtDay(s.start)} ${fmtTime(s.start)}</td><td><b>${p(s.price)}</b></td>
+    h += `<tr><td>${s.start.toLocaleDateString("en-GB",{weekday:"short",timeZone:TZ})} ${fmtTime(s.start)}</td><td><b>${p(s.price)}</b></td>
       <td><span class="pill" style="background:${COLORS[b]}">${b}</span></td>
-      <td>${w?w.temp.toFixed(1)+"°C":"–"}</td><td>${w?w.cloud+"%":"–"}</td><td>${w?Math.round(w.rad):"–"}</td></tr>`;
+      <td>${w?w.temp.toFixed(0)+"°C":"–"}</td><td class="wide-only">${w?w.cloud+"%":"–"}</td><td class="wide-only">${w?Math.round(w.rad):"–"}</td></tr>`;
   }
   $("table").innerHTML = h+"</tbody>";
 }
@@ -1000,6 +1022,9 @@ $("settings").addEventListener("click", e => {
 });
 $("restoreAll").addEventListener("click", () => restoreFromSolax(Object.keys(AUTO_KEYS).filter(k => S.manual[k])));
 $("refresh").addEventListener("click", run);
+// Redraw the chart to fit when the phone rotates or the window resizes
+let resizeT;
+addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(() => { if (LAST_CHART) renderChart(...LAST_CHART); }, 200); });
 
 fillForm(); initHp(); run();
 setInterval(run, 5*60e3);
