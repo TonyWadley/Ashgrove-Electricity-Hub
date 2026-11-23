@@ -96,6 +96,12 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 
   <div id="status" class="muted">Loading…</div>
 
+  <section class="card" id="liveCard" hidden>
+    <h2>Live system <span class="muted" id="liveMeta" style="font-weight:400;font-size:13px"></span></h2>
+    <div class="grid" id="live"></div>
+    <div class="muted" id="liveToday" style="margin-top:10px;font-size:13px"></div>
+  </section>
+
   <section class="grid" id="stats"></section>
 
   <section class="card">
@@ -212,11 +218,56 @@ function band(price, avg){
 }
 const COLORS = { plunge:"var(--plunge)", cheap:"var(--cheap)", mid:"var(--mid)", peak:"var(--peak)" };
 
+// ---------- Live SolaX data (served by server.js) ----------
+async function fetchLive(){
+  if (location.protocol === "file:") return null;
+  try { return await fetch("api/solax",{cache:"no-store"}).then(r=>r.json()); } catch { return null; }
+}
+const kw = w => w===null||w===undefined ? "–" : (Math.abs(w)/1000).toFixed(2)+" kW";
+const kwh = v => v===null||v===undefined ? "–" : (+v).toFixed(1)+" kWh";
+
+function renderLive(L, nowPrice){
+  const card = $("liveCard");
+  if (!L) { card.hidden = true; return; }
+  card.hidden = false;
+  if (!L.ok){
+    $("live").innerHTML = `<div class="muted">${L.configured===false
+      ? "Not connected. Add SOLAX_CLIENT_ID and SOLAX_CLIENT_SECRET in Render → Environment."
+      : `<span class="err">Couldn't read SolaX: ${L.error}</span>`}</div>`;
+    $("liveMeta").textContent = ""; $("liveToday").textContent = "";
+    return;
+  }
+  const g = L.gridW, b = L.batteryW;
+  const gridTxt = g===null ? "–" : g < -50 ? `Importing ${kw(g)}` : g > 50 ? `Exporting ${kw(g)}` : "Balanced";
+  const battTxt = b===null ? "" : b > 50 ? `charging ${kw(b)}` : b < -50 ? `discharging ${kw(b)}` : "idle";
+  const tiles = [
+    ["☀️ Solar", kw(L.pvW), L.pvCapacityKw ? `${L.pvCapacityKw} kWp system` : ""],
+    ["🔋 Battery", L.soc===null ? "–" : Math.round(L.soc)+"%", battTxt],
+    ["🏠 House", kw(L.loadW), "estimated use"],
+    ["🔌 Grid", gridTxt, g!==null && g < -50 && nowPrice!==null ? `costing ~${(Math.abs(g)/1000*nowPrice).toFixed(1)}p/hour` : ""],
+  ];
+  $("live").innerHTML = tiles.map(([l,v,s])=>`<div class="stat"><div class="l">${l}</div><div class="v">${v}</div><div class="muted">${s}</div></div>`).join("");
+  const t = L.today || {};
+  $("liveToday").textContent = `Today: solar ${kwh(t.yieldKwh)} · imported ${kwh(t.importKwh)} · exported ${kwh(t.exportKwh)} · battery charged ${kwh(t.chargedKwh)} / discharged ${kwh(t.dischargedKwh)}`;
+  $("liveMeta").textContent = `${L.plantName ? "· "+L.plantName+" " : ""}${L.dataTime ? "· data from "+new Date(L.dataTime).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",timeZone:TZ}) : ""}`;
+}
+
+let LIVE = null;
+
 function analyse(slots, weather){
   const avg = slots.reduce((a,s)=>a+s.price,0)/slots.length;
   const min = slots.reduce((a,s)=>s.price<a.price?s:a);
   const max = slots.reduce((a,s)=>s.price>a.price?s:a);
   const advice = [];
+  const L = LIVE && LIVE.ok ? LIVE : null;
+
+  // Right-now advice from the live system
+  if (L && L.gridW !== null){
+    const nowB = band(slots[0].price, avg);
+    if (L.gridW < -500 && nowB === "peak") advice.push(`<span class="pill" style="background:var(--peak)">NOW</span> You're importing ${kw(L.gridW)} at ${p(slots[0].price)} — an expensive slot. Delay big loads if you can${L.soc>20?", and let the battery cover the house":""}.`);
+    else if (slots[0].price < 0) advice.push(`<span class="pill" style="background:var(--plunge)">NOW</span> Prices are negative right now — import as much as you can${L.soc!==null&&L.soc<100?` (battery at ${Math.round(L.soc)}%)`:""}.`);
+    else if (L.gridW > 500 && nowB !== "peak") advice.push(`<span class="pill" style="background:var(--cheap)">NOW</span> You're exporting ${kw(L.gridW)} of spare solar — a good moment to run appliances for free.`);
+  }
 
   const tomorrowKey = dayKey(new Date(Date.now()+86400e3));
   const hasTomorrow = slots.some(s=>dayKey(s.start)===tomorrowKey && fmtTime(s.start)==="22:30");
@@ -249,10 +300,18 @@ function analyse(slots, weather){
   }
 
   // Battery charging plan
-  if (S.batteryKwh > 0 && S.chargeKw > 0){
+  const battKwh = S.batteryKwh || (L && L.batteryCapacityKwh) || 0;
+  if (battKwh > 0 && S.chargeKw > 0){
     // Solar covers part of the day's use; battery need = min(capacity, daily use - usable solar)
     const solarUseful = Math.min(solarKwh, S.dailyKwh*0.6);
-    const need = Math.max(0, Math.min(S.batteryKwh, S.dailyKwh - solarUseful));
+    let need = Math.max(0, Math.min(battKwh, S.dailyKwh - solarUseful));
+    if (L && L.soc !== null){
+      // Assume the battery keeps ~half its current charge until the cheap slots arrive
+      const stored = battKwh * L.soc/100;
+      const kept = stored * 0.5;
+      need = Math.max(0, need - kept);
+      advice.push(`Battery is at <b>${Math.round(L.soc)}%</b> (~${stored.toFixed(1)} kWh of ${battKwh} kWh) right now.`);
+    }
     const slotsNeeded = Math.ceil(need / (S.chargeKw*0.5));
     const pick = [...slots].sort((a,b)=>a.price-b.price).slice(0, slotsNeeded);
     if (need < 0.5) advice.push(`Battery: solar should cover tomorrow — <b>no need to grid-charge</b> (unless prices go negative).`);
@@ -261,7 +320,7 @@ function analyse(slots, weather){
       advice.push(`Battery: charge about <b>${need.toFixed(1)} kWh</b> (${slotsNeeded} half-hour slots at ${S.chargeKw} kW)` +
         (S.solarKwp>0 ? `, allowing for ~${solarUseful.toFixed(1)} kWh of solar` : "") +
         `. Cheapest slots: <b>${groupRuns(pick).map(rangeText).join(", ")}</b> (avg ${p(avgPick)}).`);
-      if (S.solarKwp>0 && solarKwh > S.batteryKwh) advice.push(`Strong solar tomorrow — consider only a partial overnight charge so the battery has room to absorb free daytime generation.`);
+      if (S.solarKwp>0 && solarKwh > battKwh) advice.push(`Strong solar tomorrow — consider only a partial overnight charge so the battery has room to absorb free daytime generation.`);
     }
   }
 
@@ -322,8 +381,10 @@ function renderTable(slots, weather, avg){
 async function run(){
   $("status").textContent = "Loading prices and weather…";
   try{
-    const [slots, weather] = await Promise.all([fetchPrices(S.region), fetchWeather(S.lat, S.lon)]);
+    const [slots, weather, live] = await Promise.all([fetchPrices(S.region), fetchWeather(S.lat, S.lon), fetchLive()]);
     if (!slots.length) throw new Error("No upcoming prices returned");
+    LIVE = live;
+    renderLive(live, slots[0].price);
     const a = analyse(slots, weather);
     const now = slots[0];
     $("stats").innerHTML = [
@@ -362,7 +423,7 @@ $("settings").addEventListener("submit", async ev=>{
 $("refresh").addEventListener("click", run);
 
 fillForm(); run();
-setInterval(run, 30*60e3);
+setInterval(run, 5*60e3);
 </script>
 </body>
 </html>

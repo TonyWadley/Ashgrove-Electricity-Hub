@@ -1,0 +1,13 @@
+{
+  "name": "ashgrove-electricity-hub",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Agile import advisor with live SolaX system data",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
