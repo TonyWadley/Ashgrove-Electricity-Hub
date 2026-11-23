@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agile Import Advisor</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#ffffff; --ink:#1b1f24; --muted:#5f6b78; --line:#e3e7ec;
+  --accent:#5b3fd6; --cheap:#1f9d62; --plunge:#0b74c4; --mid:#c9a227; --peak:#d2453b; --sun:#f0a400;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#12151a; --card:#1b2027; --ink:#e8ecf1; --muted:#9aa6b2; --line:#2b323c;
+    --accent:#9b87ff; --cheap:#3cc483; --plunge:#4aa8ef; --mid:#e0bb45; --peak:#ef6a60; --sun:#ffbe3b; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{padding:20px 16px 8px;max-width:1100px;margin:0 auto;display:flex;flex-wrap:wrap;gap:12px;align-items:end;justify-content:space-between}
+h1{margin:0;font-size:22px}
+h2{margin:0 0 10px;font-size:16px}
+main{max-width:1100px;margin:0 auto;padding:8px 16px 40px;display:grid;gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.muted{color:var(--muted)}
+.grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.stat .v{font-size:26px;font-weight:650}
+.stat .l{color:var(--muted);font-size:13px}
+details summary{cursor:pointer;font-weight:600}
+form.settings{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-top:12px}
+label{display:grid;gap:4px;font-size:13px;color:var(--muted)}
+input,select,button{font:inherit;padding:7px 9px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--ink)}
+button{background:var(--accent);color:#fff;border:0;cursor:pointer;font-weight:600}
+button.secondary{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+.advice li{margin:6px 0}
+.pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;color:#fff}
+.chart-wrap{overflow-x:auto}
+svg text{fill:var(--muted);font-size:10px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+.tablewrap{max-height:420px;overflow:auto}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--muted);margin-top:6px}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;background:var(--c)}
+.err{color:var(--peak)}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>⚡ Agile Import Advisor</h1>
+    <div class="muted" id="sub">Octopus Agile prices + tomorrow's weather → when to import</div>
+  </div>
+  <button id="refresh">Refresh</button>
+</header>
+<main>
+  <section class="card">
+    <details id="settingsBox">
+      <summary>Settings</summary>
+      <form class="settings" id="settings">
+        <label>Postcode (sets region &amp; weather)
+          <input name="postcode" placeholder="e.g. SW1A 1AA">
+        </label>
+        <label>Region (auto from postcode)
+          <select name="region">
+            <option value="A">A – Eastern England</option><option value="B">B – East Midlands</option>
+            <option value="C">C – London</option><option value="D">D – Merseyside &amp; N Wales</option>
+            <option value="E">E – West Midlands</option><option value="F">F – North East</option>
+            <option value="G">G – North West</option><option value="H">H – Southern</option>
+            <option value="J">J – South East</option><option value="K">K – South Wales</option>
+            <option value="L">L – South West</option><option value="M">M – Yorkshire</option>
+            <option value="N">N – South Scotland</option><option value="P">P – North Scotland</option>
+          </select>
+        </label>
+        <label>Long load duration (hours) – EV, washing, etc.
+          <input name="blockHours" type="number" min="0.5" max="12" step="0.5">
+        </label>
+        <label>Cheap threshold (p/kWh)
+          <input name="cheap" type="number" step="0.5">
+        </label>
+        <label>Solar size (kWp, 0 if none)
+          <input name="solarKwp" type="number" min="0" step="0.1">
+        </label>
+        <label>Battery usable size (kWh, 0 if none)
+          <input name="batteryKwh" type="number" min="0" step="0.1">
+        </label>
+        <label>Battery charge rate (kW)
+          <input name="chargeKw" type="number" min="0" step="0.1">
+        </label>
+        <label>Typical daily use (kWh)
+          <input name="dailyKwh" type="number" min="0" step="0.5">
+        </label>
+        <div style="display:flex;gap:8px;align-items:end">
+          <button type="submit">Save &amp; update</button>
+        </div>
+      </form>
+    </details>
+  </section>
+
+  <div id="status" class="muted">Loading…</div>
+
+  <section class="grid" id="stats"></section>
+
+  <section class="card">
+    <h2>Recommendations</h2>
+    <ul class="advice" id="advice"></ul>
+  </section>
+
+  <section class="card">
+    <h2>Price &amp; weather timeline</h2>
+    <div class="chart-wrap"><div id="chart"></div></div>
+    <div class="legend">
+      <span style="--c:var(--plunge)">Negative (paid to use)</span>
+      <span style="--c:var(--cheap)">Cheap</span>
+      <span style="--c:var(--mid)">Average</span>
+      <span style="--c:var(--peak)">Expensive</span>
+      <span style="--c:var(--sun)">Solar irradiance (line)</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>All upcoming slots</h2>
+    <div class="tablewrap"><table id="table"></table></div>
+  </section>
+
+  <p class="muted" style="font-size:12px">Prices: Octopus Energy public API (Agile, inc. VAT). Weather: Open-Meteo. Location: postcodes.io.
+  Agile prices for the next day are normally published around 4pm UK time. Solar estimate is a rough guide (irradiance × kWp × 0.8).</p>
+</main>
+
+<script>
+const PRODUCT = "AGILE-24-10-01";
+const TZ = "Europe/London";
+const DEFAULTS = { postcode:"", region:"C", blockHours:3, cheap:15, solarKwp:0, batteryKwh:0, chargeKw:3, dailyKwh:10, lat:51.5074, lon:-0.1278 };
+
+function loadSettings(){
+  try { return {...DEFAULTS, ...JSON.parse(localStorage.getItem("agileAdvisor")||"{}")}; } catch { return {...DEFAULTS}; }
+}
+function saveSettings(s){ try { localStorage.setItem("agileAdvisor", JSON.stringify(s)); } catch {} }
+
+let S = loadSettings();
+const $ = id => document.getElementById(id);
+
+function fillForm(){
+  const f = $("settings");
+  for (const k of ["postcode","region","blockHours","cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) f.elements[k].value = S[k];
+  if (!S.postcode) $("settingsBox").open = true;
+}
+
+const fmtTime = d => d.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",timeZone:TZ});
+const fmtDay = d => d.toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short",timeZone:TZ});
+const dayKey = d => d.toLocaleDateString("en-CA",{timeZone:TZ});
+const p = v => (Math.round(v*100)/100).toFixed(2)+"p";
+
+async function lookupPostcode(pc){
+  const clean = pc.replace(/\s+/g,"").toUpperCase();
+  const [geo, gsp] = await Promise.all([
+    fetch("https://api.postcodes.io/postcodes/"+encodeURIComponent(clean)).then(r=>r.json()),
+    fetch("https://api.octopus.energy/v1/industry/grid-supply-points/?postcode="+encodeURIComponent(clean)).then(r=>r.json())
+  ]);
+  if (geo.status !== 200) throw new Error("Postcode not found");
+  const region = gsp.results && gsp.results[0] ? gsp.results[0].group_id.replace("_","") : null;
+  return { lat: geo.result.latitude, lon: geo.result.longitude, region };
+}
+
+async function fetchPrices(region){
+  const from = new Date(); from.setMinutes(from.getMinutes() < 30 ? 0 : 30, 0, 0);
+  const to = new Date(Date.now() + 48*3600e3);
+  const url = `https://api.octopus.energy/v1/products/${PRODUCT}/electricity-tariffs/E-1R-${PRODUCT}-${region}/standard-unit-rates/?period_from=${from.toISOString()}&period_to=${to.toISOString()}&page_size=200`;
+  const j = await fetch(url).then(r=>{ if(!r.ok) throw new Error("Octopus API "+r.status); return r.json(); });
+  return j.results.map(r=>({ start:new Date(r.valid_from), end:new Date(r.valid_to), price:r.value_inc_vat }))
+    .sort((a,b)=>a.start-b.start);
+}
+
+async function fetchWeather(lat, lon){
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m,cloud_cover,shortwave_radiation,precipitation_probability&forecast_days=3&timezone=UTC`;
+  const j = await fetch(url).then(r=>{ if(!r.ok) throw new Error("Weather API "+r.status); return r.json(); });
+  const h = j.hourly;
+  return h.time.map((t,i)=>({ time:new Date(t+"Z"), temp:h.temperature_2m[i], cloud:h.cloud_cover[i], rad:h.shortwave_radiation[i], rain:h.precipitation_probability[i] }));
+}
+
+function weatherAt(weather, d){
+  const hour = new Date(d); hour.setUTCMinutes(0,0,0);
+  return weather.find(w => w.time.getTime() === hour.getTime());
+}
+
+function cheapestBlock(slots, n){
+  let best=null;
+  for (let i=0;i+n<=slots.length;i++){
+    const seg = slots.slice(i,i+n);
+    // must be contiguous
+    if (seg[n-1].start - seg[0].start !== (n-1)*1800e3) continue;
+    const avg = seg.reduce((a,s)=>a+s.price,0)/n;
+    if (!best || avg < best.avg) best = { start:seg[0].start, end:seg[n-1].end, avg };
+  }
+  return best;
+}
+
+function groupRuns(slots){
+  // merge adjacent slots into time ranges
+  const sorted = [...slots].sort((a,b)=>a.start-b.start), runs=[];
+  for (const s of sorted){
+    const last = runs[runs.length-1];
+    if (last && last.end.getTime() === s.start.getTime()){ last.end = s.end; last.prices.push(s.price); }
+    else runs.push({ start:s.start, end:s.end, prices:[s.price] });
+  }
+  return runs;
+}
+const rangeText = r => `${fmtDay(r.start)} ${fmtTime(r.start)}–${fmtTime(r.end)}`;
+
+function band(price, avg){
+  if (price < 0) return "plunge";
+  if (price <= S.cheap) return "cheap";
+  if (price >= Math.max(avg*1.25, 28)) return "peak";
+  return "mid";
+}
+const COLORS = { plunge:"var(--plunge)", cheap:"var(--cheap)", mid:"var(--mid)", peak:"var(--peak)" };
+
+function analyse(slots, weather){
+  const avg = slots.reduce((a,s)=>a+s.price,0)/slots.length;
+  const min = slots.reduce((a,s)=>s.price<a.price?s:a);
+  const max = slots.reduce((a,s)=>s.price>a.price?s:a);
+  const advice = [];
+
+  const tomorrowKey = dayKey(new Date(Date.now()+86400e3));
+  const hasTomorrow = slots.some(s=>dayKey(s.start)===tomorrowKey && fmtTime(s.start)==="22:30");
+  if (!hasTomorrow) advice.push(`<b>Tomorrow's full prices aren't published yet</b> — Octopus usually releases them around 4pm. Advice below covers the slots available so far; refresh after 4pm.`);
+
+  // Plunge pricing
+  const neg = slots.filter(s=>s.price<0);
+  if (neg.length) advice.push(`<span class="pill" style="background:var(--plunge)">PLUNGE</span> You get <b>paid</b> to import during: ${groupRuns(neg).map(rangeText).join(", ")}. Run everything you can and charge any battery/EV.`);
+
+  // Cheapest block for long loads
+  const n = Math.max(1, Math.round(S.blockHours*2));
+  const blk = cheapestBlock(slots, n);
+  if (blk) advice.push(`Best ${S.blockHours}h window for big loads (EV, washing, dishwasher, immersion): <b>${rangeText(blk)}</b>, averaging <b>${p(blk.avg)}</b>/kWh.`);
+
+  // Weather / solar
+  const tomorrowWx = weather.filter(w=>dayKey(w.time)===tomorrowKey);
+  let solarKwh = 0;
+  if (tomorrowWx.length){
+    const avgT = tomorrowWx.reduce((a,w)=>a+w.temp,0)/tomorrowWx.length;
+    const minT = Math.min(...tomorrowWx.map(w=>w.temp));
+    const daylight = tomorrowWx.filter(w=>w.rad>20);
+    const avgCloud = daylight.length ? daylight.reduce((a,w)=>a+w.cloud,0)/daylight.length : 100;
+    const radWh = tomorrowWx.reduce((a,w)=>a+w.rad,0); // Wh/m² over the day
+    solarKwh = S.solarKwp * radWh/1000 * 0.8;
+    const sky = avgCloud < 30 ? "mostly sunny ☀️" : avgCloud < 70 ? "mixed cloud ⛅" : "overcast ☁️";
+    let wx = `Tomorrow's weather: <b>${sky}</b>, avg ${avgT.toFixed(1)}°C (low ${minT.toFixed(1)}°C), daytime cloud ${Math.round(avgCloud)}%.`;
+    if (S.solarKwp > 0) wx += ` Estimated solar generation ≈ <b>${solarKwh.toFixed(1)} kWh</b> from your ${S.solarKwp} kWp.`;
+    if (minT < 3) wx += ` It's cold — expect higher demand if you heat electrically; pre-heat during cheap slots.`;
+    advice.push(wx);
+  }
+
+  // Battery charging plan
+  if (S.batteryKwh > 0 && S.chargeKw > 0){
+    // Solar covers part of the day's use; battery need = min(capacity, daily use - usable solar)
+    const solarUseful = Math.min(solarKwh, S.dailyKwh*0.6);
+    const need = Math.max(0, Math.min(S.batteryKwh, S.dailyKwh - solarUseful));
+    const slotsNeeded = Math.ceil(need / (S.chargeKw*0.5));
+    const pick = [...slots].sort((a,b)=>a.price-b.price).slice(0, slotsNeeded);
+    if (need < 0.5) advice.push(`Battery: solar should cover tomorrow — <b>no need to grid-charge</b> (unless prices go negative).`);
+    else {
+      const avgPick = pick.reduce((a,s)=>a+s.price,0)/pick.length;
+      advice.push(`Battery: charge about <b>${need.toFixed(1)} kWh</b> (${slotsNeeded} half-hour slots at ${S.chargeKw} kW)` +
+        (S.solarKwp>0 ? `, allowing for ~${solarUseful.toFixed(1)} kWh of solar` : "") +
+        `. Cheapest slots: <b>${groupRuns(pick).map(rangeText).join(", ")}</b> (avg ${p(avgPick)}).`);
+      if (S.solarKwp>0 && solarKwh > S.batteryKwh) advice.push(`Strong solar tomorrow — consider only a partial overnight charge so the battery has room to absorb free daytime generation.`);
+    }
+  }
+
+  // Cheap slots summary
+  const cheap = slots.filter(s=>s.price>=0 && s.price<=S.cheap);
+  if (cheap.length) advice.push(`<span class="pill" style="background:var(--cheap)">CHEAP</span> ≤ ${S.cheap}p periods: ${groupRuns(cheap).map(r=>`${rangeText(r)} (from ${p(Math.min(...r.prices))})`).join("; ")}.`);
+  else advice.push(`No slots at or below your ${S.cheap}p cheap threshold — the lowest is ${p(min.price)} at ${fmtDay(min.start)} ${fmtTime(min.start)}.`);
+
+  // Avoid
+  const peak = slots.filter(s=>band(s.price,avg)==="peak");
+  if (peak.length) advice.push(`<span class="pill" style="background:var(--peak)">AVOID</span> ${groupRuns(peak).map(r=>`${rangeText(r)} (up to ${p(Math.max(...r.prices))})`).join("; ")}.`);
+
+  return { avg, min, max, advice, solarKwh };
+}
+
+function renderChart(slots, weather, avg){
+  const W = Math.max(720, slots.length*14), H = 260, pad = {l:36,r:10,t:12,b:34};
+  const iw = W-pad.l-pad.r, ih = H-pad.t-pad.b;
+  const lo = Math.min(0, ...slots.map(s=>s.price)), hi = Math.max(...slots.map(s=>s.price), 10);
+  const y = v => pad.t + ih - (v-lo)/(hi-lo)*ih;
+  const bw = iw/slots.length;
+  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Agile price chart">`;
+  // grid
+  const step = hi-lo > 40 ? 10 : 5;
+  for (let v=Math.ceil(lo/step)*step; v<=hi; v+=step){
+    svg += `<line x1="${pad.l}" x2="${W-pad.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--line)"/><text x="${pad.l-4}" y="${y(v)+3}" text-anchor="end">${v}p</text>`;
+  }
+  // solar line (scaled to chart height, 0..1000 W/m²)
+  const pts = slots.map((s,i)=>{ const w = weatherAt(weather, s.start); return w ? `${pad.l+i*bw+bw/2},${pad.t+ih-(Math.min(w.rad,800)/800)*ih}` : null; }).filter(Boolean);
+  // bars
+  slots.forEach((s,i)=>{
+    const x = pad.l+i*bw, y0 = y(0), y1 = y(s.price);
+    const w = weatherAt(weather, s.start);
+    const tip = `${fmtDay(s.start)} ${fmtTime(s.start)} — ${p(s.price)}${w?` · ${w.temp.toFixed(1)}°C, ${w.cloud}% cloud`:""}`;
+    svg += `<rect x="${x+1}" y="${Math.min(y0,y1)}" width="${Math.max(1,bw-2)}" height="${Math.max(1,Math.abs(y1-y0))}" rx="2" fill="${COLORS[band(s.price,avg)]}"><title>${tip}</title></rect>`;
+    if (fmtTime(s.start).endsWith(":00") && (+fmtTime(s.start).slice(0,2))%3===0){
+      svg += `<text x="${x}" y="${H-pad.b+14}">${fmtTime(s.start)}</text>`;
+      if (fmtTime(s.start)==="00:00") svg += `<text x="${x}" y="${H-pad.b+27}" style="font-weight:600">${fmtDay(s.start)}</text><line x1="${x}" x2="${x}" y1="${pad.t}" y2="${pad.t+ih}" stroke="var(--muted)" stroke-dasharray="3 3"/>`;
+    }
+  });
+  if (pts.length) svg += `<polyline points="${pts.join(" ")}" fill="none" stroke="var(--sun)" stroke-width="2" opacity=".85"/>`;
+  svg += `<line x1="${pad.l}" x2="${W-pad.r}" y1="${y(avg)}" y2="${y(avg)}" stroke="var(--ink)" stroke-dasharray="4 4" opacity=".4"/>`;
+  svg += `</svg>`;
+  $("chart").innerHTML = svg;
+}
+
+function renderTable(slots, weather, avg){
+  let h = `<thead><tr><th>Time</th><th>Price</th><th></th><th>Temp</th><th>Cloud</th><th>Sun W/m²</th></tr></thead><tbody>`;
+  for (const s of slots){
+    const w = weatherAt(weather, s.start), b = band(s.price,avg);
+    h += `<tr><td>${fmtDay(s.start)} ${fmtTime(s.start)}</td><td><b>${p(s.price)}</b></td>
+      <td><span class="pill" style="background:${COLORS[b]}">${b}</span></td>
+      <td>${w?w.temp.toFixed(1)+"°C":"–"}</td><td>${w?w.cloud+"%":"–"}</td><td>${w?Math.round(w.rad):"–"}</td></tr>`;
+  }
+  $("table").innerHTML = h+"</tbody>";
+}
+
+async function run(){
+  $("status").textContent = "Loading prices and weather…";
+  try{
+    const [slots, weather] = await Promise.all([fetchPrices(S.region), fetchWeather(S.lat, S.lon)]);
+    if (!slots.length) throw new Error("No upcoming prices returned");
+    const a = analyse(slots, weather);
+    const now = slots[0];
+    $("stats").innerHTML = [
+      ["Now", p(now.price), `${fmtTime(now.start)}–${fmtTime(now.end)}`],
+      ["Cheapest", p(a.min.price), `${fmtDay(a.min.start)} ${fmtTime(a.min.start)}`],
+      ["Most expensive", p(a.max.price), `${fmtDay(a.max.start)} ${fmtTime(a.max.start)}`],
+      ["Average (upcoming)", p(a.avg), `${slots.length} half-hour slots`]
+    ].map(([l,v,s])=>`<div class="card stat"><div class="l">${l}</div><div class="v">${v}</div><div class="muted">${s}</div></div>`).join("");
+    $("advice").innerHTML = a.advice.map(x=>`<li>${x}</li>`).join("");
+    renderChart(slots, weather, a.avg);
+    renderTable(slots, weather, a.avg);
+    $("status").textContent = `Region ${S.region}${S.postcode?` · ${S.postcode.toUpperCase()}`:""} · prices to ${fmtDay(slots.at(-1).end)} ${fmtTime(slots.at(-1).end)} · updated ${new Date().toLocaleTimeString("en-GB",{timeZone:TZ})}`;
+  } catch(e){
+    $("status").innerHTML = `<span class="err">Couldn't load data: ${e.message}</span>`;
+  }
+}
+
+$("settings").addEventListener("submit", async ev=>{
+  ev.preventDefault();
+  const f = ev.target.elements;
+  const next = {...S};
+  for (const k of ["blockHours","cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) next[k] = parseFloat(f[k].value)||0;
+  next.blockHours = next.blockHours || 3;
+  next.region = f.region.value;
+  const pc = f.postcode.value.trim();
+  if (pc && pc !== S.postcode){
+    try{
+      const g = await lookupPostcode(pc);
+      next.lat = g.lat; next.lon = g.lon; if (g.region) next.region = g.region;
+      f.region.value = next.region;
+    } catch(e){ $("status").innerHTML = `<span class="err">${e.message}</span>`; return; }
+  }
+  next.postcode = pc;
+  S = next; saveSettings(S); run();
+});
+$("refresh").addEventListener("click", run);
+
+fillForm(); run();
+setInterval(run, 30*60e3);
+</script>
+</body>
+</html>
