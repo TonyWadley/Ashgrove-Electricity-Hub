@@ -43,6 +43,13 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 [hidden]{display:none !important}
 .presets{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .presets button{padding:5px 10px;font-weight:500}
+.presets button.active{background:var(--accent);color:#fff}
+.hp-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
+.hp-row input{width:auto}
+.hp-row button{padding:4px 10px}
+.hp-out{margin-top:12px;display:grid;gap:10px}
+.hp-out .item{border-left:3px solid var(--line);padding:2px 0 2px 10px}
+.hp-out .item b.t{display:block}
 .loadbest{font-size:20px;font-weight:650}
 .save{color:var(--cheap);font-weight:600}
 </style>
@@ -108,17 +115,18 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 
   <section class="card" id="loadCard">
     <h2>Plan a load</h2>
-    <div class="muted" style="font-size:13px">Enter how long it runs and I'll find the cheapest time to start it.</div>
+    <div class="muted" style="font-size:13px">Pick an appliance (or just type), and I'll find the cheapest time to start it. Changes are saved for the selected appliance.</div>
     <div class="presets" id="presets">
-      <button type="button" class="secondary" data-h="2" data-kw="0.8">👕 Washing machine</button>
-      <button type="button" class="secondary" data-h="2.5" data-kw="1.2">🍽️ Dishwasher</button>
-      <button type="button" class="secondary" data-h="1.5" data-kw="2.5">🌀 Tumble dryer</button>
+      <button type="button" class="secondary" data-id="washing" data-h="2" data-kw="0.8">👕 Washing machine</button>
+      <button type="button" class="secondary" data-id="dishwasher" data-h="2.5" data-kw="1.2">🍽️ Dishwasher</button>
+      <button type="button" class="secondary" data-id="dryer" data-h="1.5" data-kw="2.5">🌀 Tumble dryer</button>
       <button type="button" class="secondary" id="otherToggle" aria-expanded="false">Other ▾</button>
       <div class="presets" id="otherPresets" hidden style="flex-basis:100%;margin-top:0">
-        <button type="button" class="secondary" data-h="0" data-kw="7">🚗 EV charge</button>
-        <button type="button" class="secondary" data-h="0" data-kw="3">🚿 Immersion</button>
+        <button type="button" class="secondary" data-id="ev" data-h="0" data-kw="7">🚗 EV charge</button>
+        <button type="button" class="secondary" data-id="immersion" data-h="0" data-kw="3">🚿 Immersion</button>
       </div>
     </div>
+    <div id="loadNote" class="muted" style="font-size:12px;margin-top:8px;min-height:16px"></div>
     <form class="settings" id="loadForm" onsubmit="return false" style="margin-top:4px">
       <label>How long does it run? (hours)
         <input name="blockHours" type="number" min="0.5" max="24" step="0.5" required>
@@ -131,6 +139,32 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
       </label>
     </form>
     <div id="loadResult" style="margin-top:12px"></div>
+  </section>
+
+  <section class="card" id="hpCard">
+    <h2>Heat pump plan</h2>
+    <details id="hpSetup">
+      <summary>Heat pump setup</summary>
+      <form class="settings" id="hpForm" onsubmit="return false">
+        <label>Heat pump size (kW heat output – on its label)
+          <input name="heatKw" type="number" min="0" step="any" placeholder="e.g. 8.5">
+        </label>
+        <label>Hot water reheat takes (hours)
+          <input name="dhwHours" type="number" min="0" max="6" step="0.5">
+        </label>
+        <label>Hot water ready by
+          <input name="dhwReadyBy" type="time">
+        </label>
+        <label>Pre-heat allowed (hours before heating is on)
+          <input name="preheatHours" type="number" min="0" max="6" step="0.5">
+        </label>
+      </form>
+      <div class="muted" style="font-size:13px;margin-top:14px">Heating forced on — times the house must be warm:</div>
+      <div id="hpPeriods"></div>
+      <button type="button" class="secondary" id="hpAdd" style="padding:5px 10px;font-weight:500">+ Add period</button>
+      <div class="muted" style="font-size:12px;margin-top:8px">Saved automatically. Running costs assume full power, so they're an upper limit — heat pumps usually run at part power.</div>
+    </details>
+    <div id="hpResult" class="hp-out"></div>
   </section>
 
   <section class="card">
@@ -259,14 +293,18 @@ function weatherAt(weather, d){
   return weather.find(w => w.time.getTime() === hour.getTime());
 }
 
-function cheapestBlock(slots, n){
+// Cheapest run of n contiguous half-hour slots. `score` ranks slots (default: price);
+// the result's avg is always the average price, score is the average score.
+function cheapestBlock(slots, n, score = s => s.price){
   let best=null;
   for (let i=0;i+n<=slots.length;i++){
     const seg = slots.slice(i,i+n);
     // must be contiguous
     if (seg[n-1].start - seg[0].start !== (n-1)*1800e3) continue;
-    const avg = seg.reduce((a,s)=>a+s.price,0)/n;
-    if (!best || avg < best.avg) best = { start:seg[0].start, end:seg[n-1].end, avg };
+    const sc = seg.reduce((a,s)=>a+score(s),0)/n;
+    if (!best || sc < best.score){
+      best = { start:seg[0].start, end:seg[n-1].end, score:sc, avg:seg.reduce((a,s)=>a+s.price,0)/n, slots:seg };
+    }
   }
   return best;
 }
@@ -494,11 +532,22 @@ function renderLoad(){
   out.innerHTML = html;
 }
 
+// Each appliance remembers its own hours / kW / finish-by (S.appliances[id])
+S.appliances = S.appliances || {};
+function presetButton(id){ return document.querySelector(`#presets button[data-id="${id}"]`); }
+function showSelected(){
+  document.querySelectorAll("#presets button[data-id]").forEach(b => b.classList.toggle("active", b.dataset.id === S.selected));
+  const b = S.selected && presetButton(S.selected);
+  if (b && b.closest("#otherPresets")){ $("otherPresets").hidden = false; $("otherToggle").textContent = "Other ▴"; }
+  $("loadNote").textContent = b ? `Editing ${b.textContent.trim()} — your changes are saved for next time.` : "";
+}
+
 $("loadForm").addEventListener("input", e => {
   const f = $("loadForm").elements;
   S.blockHours = parseFloat(f.blockHours.value) || 0;
   S.loadKw = f.loadKw.value;
   S.finishBy = f.finishBy.value;
+  if (S.selected) S.appliances[S.selected] = { h:S.blockHours, kw:S.loadKw, finishBy:S.finishBy };
   saveSettings(S); renderLoad();
 });
 $("presets").addEventListener("click", e => {
@@ -509,12 +558,151 @@ $("presets").addEventListener("click", e => {
     b.textContent = box.hidden ? "Other ▾" : "Other ▴";
     return;
   }
-  S.blockHours = parseFloat(b.dataset.h); S.loadKw = b.dataset.kw;
-  const f = $("loadForm").elements; f.blockHours.value = S.blockHours; f.loadKw.value = S.loadKw;
-  saveSettings(S); renderLoad();
+  const id = b.dataset.id;
+  // Clicking the selected appliance again deselects it
+  if (S.selected === id){ S.selected = ""; saveSettings(S); showSelected(); return; }
+  const saved = S.appliances[id] || { h:parseFloat(b.dataset.h), kw:b.dataset.kw, finishBy:"" };
+  S.selected = id; S.blockHours = saved.h; S.loadKw = saved.kw; S.finishBy = saved.finishBy || "";
+  const f = $("loadForm").elements;
+  f.blockHours.value = S.blockHours; f.loadKw.value = S.loadKw; f.finishBy.value = S.finishBy;
+  saveSettings(S); showSelected(); renderLoad();
   // EV and immersion start at 0 hours: put the cursor in the hours box to fill in
   if (!S.blockHours){ f.blockHours.focus(); f.blockHours.select(); }
 });
+showSelected();
+
+// ---------- Heat pump plan ----------
+let LAST_WEATHER = [];
+const HP_DEFAULT = { heatKw:"", dhwHours:1, dhwReadyBy:"07:00", preheatHours:2,
+  periods:[{from:"06:30",to:"08:30"},{from:"17:00",to:"22:00"}] };
+S.hp = { ...HP_DEFAULT, ...(S.hp || {}) };
+
+// Rough air-source COP from outside air temperature. Hot water needs a hotter
+// flow temperature, so it's less efficient. Estimates, not manufacturer data.
+const cop = (t, hotWater=false) => Math.min(5, Math.max(1.6, 3.3 + 0.09*(t-7) - (hotWater?0.7:0)));
+const slotTemp = s => { const w = weatherAt(LAST_WEATHER, s.start); return w ? w.temp : 7; };
+const halfHour = hhmm => { const [h,m] = hhmm.split(":").map(Number); return `${String(h).padStart(2,"0")}:${m<30?"00":"30"}`; };
+const mins = hhmm => { const [h,m] = hhmm.split(":").map(Number); return h*60+m; };
+const avgOf = (arr, f) => arr.reduce((a,x)=>a+f(x),0)/arr.length;
+
+function renderPeriods(){
+  $("hpPeriods").innerHTML = S.hp.periods.map((p,i)=>`
+    <div class="hp-row">
+      <input type="time" data-i="${i}" data-f="from" value="${p.from}" aria-label="Heating on from">
+      <span class="muted">to</span>
+      <input type="time" data-i="${i}" data-f="to" value="${p.to}" aria-label="Heating on until">
+      <button type="button" class="secondary" data-del="${i}" aria-label="Remove period">✕</button>
+    </div>`).join("");
+}
+function initHp(){
+  const f = $("hpForm").elements;
+  for (const k of ["heatKw","dhwHours","dhwReadyBy","preheatHours"]) f[k].value = S.hp[k] ?? "";
+  renderPeriods();
+  if (!S.hp.heatKw) $("hpSetup").open = true;
+}
+$("hpForm").addEventListener("input", () => {
+  const f = $("hpForm").elements;
+  S.hp.heatKw = f.heatKw.value; S.hp.dhwHours = parseFloat(f.dhwHours.value) || 0;
+  S.hp.dhwReadyBy = f.dhwReadyBy.value; S.hp.preheatHours = parseFloat(f.preheatHours.value) || 0;
+  saveSettings(S); renderHp();
+});
+$("hpPeriods").addEventListener("input", e => {
+  const t = e.target; if (t.dataset.i === undefined) return;
+  S.hp.periods[+t.dataset.i][t.dataset.f] = t.value;
+  saveSettings(S); renderHp();
+});
+$("hpPeriods").addEventListener("click", e => {
+  const b = e.target.closest("button[data-del]"); if (!b) return;
+  S.hp.periods.splice(+b.dataset.del, 1);
+  saveSettings(S); renderPeriods(); renderHp();
+});
+$("hpAdd").addEventListener("click", () => {
+  S.hp.periods.push({ from:"12:00", to:"14:00" });
+  saveSettings(S); renderPeriods(); renderHp();
+});
+
+function renderHp(){
+  const out = $("hpResult"), slots = LAST_SLOTS;
+  if (!slots) return;
+  const heatKw = parseFloat(S.hp.heatKw);
+  if (!heatKw){ out.innerHTML = `<div class="muted">Enter your heat pump's size above (the kW heat output on its label, e.g. 8.5) to get a plan.</div>`; return; }
+  const avgAll = avgOf(slots, s=>s.price);
+  const items = [];
+
+  // Hot water: cheapest block before "ready by", ranked by cost per unit of heat
+  const n = Math.round((S.hp.dhwHours||0)*2);
+  if (n > 0){
+    let pool = slots, note = "";
+    if (S.hp.dhwReadyBy){
+      const hit = slots.find(s => fmtTime(s.end) === halfHour(S.hp.dhwReadyBy));
+      if (hit) pool = slots.filter(s => s.end <= hit.end);
+      else note = ` Prices up to ${S.hp.dhwReadyBy} aren't published yet — check after 4pm.`;
+    }
+    const b = cheapestBlock(pool, n, s => s.price / cop(slotTemp(s), true));
+    if (b){
+      const c = avgOf(b.slots, s => cop(slotTemp(s), true));
+      const kw = heatKw / c;
+      items.push(`<div class="item"><b class="t">🚿 Hot water: ${fmtDay(b.start)} ${fmtTime(b.start)}–${fmtTime(b.end)}</b>
+        Average ${p(b.avg)}/kWh · about ${kw.toFixed(1)} kW · up to ${pounds(kw*S.hp.dhwHours*b.avg)}.
+        ${b.slots.some(s=>slotTemp(s) > avgOf(slots, slotTemp)+1) ? "Milder air then makes the heat pump more efficient." : ""}${note}</div>`);
+    } else items.push(`<div class="item"><b class="t">🚿 Hot water</b>Not enough published prices before ${S.hp.dhwReadyBy}.</div>`);
+  }
+
+  // Heating periods
+  for (const per of S.hp.periods){
+    if (!per.from || !per.to) continue;
+    let dur = mins(per.to) - mins(per.from); if (dur <= 0) dur += 1440;
+    const title = `🔥 Heating ${per.from}–${per.to}`;
+    // Is the period on right now? Then plan the rest of it.
+    const sinceStart = (mins(fmtTime(slots[0].start)) - mins(halfHour(per.from)) + 1440) % 1440;
+    let start, end, onNow = false;
+    if (sinceStart < dur){
+      onNow = true; start = slots[0].start; end = new Date(start.getTime() + (dur - sinceStart)*60e3);
+    } else {
+      const startIdx = slots.findIndex(s => fmtTime(s.start) === halfHour(per.from));
+      if (startIdx < 0){ items.push(`<div class="item"><b class="t">${title}</b><span class="muted">Prices for the next ${per.from} aren't published yet — check after 4pm.</span></div>`); continue; }
+      start = slots[startIdx].start; end = new Date(start.getTime() + dur*60e3);
+    }
+    const inP = slots.filter(s => s.start >= start && s.start < end);
+    if (!inP.length) continue;
+    const pAvg = avgOf(inP, s=>s.price), tAvg = avgOf(inP, slotTemp);
+    const kw = heatKw / cop(tAvg);
+    let html = `<b class="t">${title} (${onNow ? "on now" : fmtDay(start)})</b>
+      Average ${p(pAvg)}/kWh at ~${tAvg.toFixed(0)}°C · about ${kw.toFixed(1)} kW at full power · up to ${pounds(kw*inP.length/2*pAvg)}.`;
+    if (inP.length < dur/30) html += ` <span class="muted">(only ${inP.length/2}h of this period is priced so far)</span>`;
+
+    // Pre-heat: cheapest hour in the allowed window before the period
+    const ph = S.hp.preheatHours || 0;
+    let preheated = false;
+    if (ph > 0 && !onNow){
+      const win = slots.filter(s => s.start < start && s.start >= new Date(start.getTime() - ph*3600e3));
+      const pre = cheapestBlock(win, Math.min(2, win.length), s => s.price / cop(slotTemp(s)));
+      const firstHour = inP.slice(0,2);
+      if (pre && pre.avg < avgOf(firstHour, s=>s.price) - 2 && (preheated = true))
+        html += `<br>➜ <b>Pre-heat ${fmtTime(pre.start)}–${fmtTime(pre.end)}</b> at ${p(pre.avg)} — raise the temperature 1–2°C so the house coasts into the period.`;
+    }
+    // Peak inside the period: set back and pre-heat before it
+    const peak = inP.filter(s => band(s.price, avgAll) === "peak");
+    if (peak.length){
+      const runs = groupRuns(peak);
+      const r0 = runs[0];
+      const before = slots.filter(s => s.start < r0.start && s.start >= new Date(r0.start.getTime() - 3*3600e3) && band(s.price, avgAll) !== "peak");
+      const pre = cheapestBlock(before, Math.min(2, before.length));
+      html += `<br>➜ <b>Turn down 1–2°C ${runs.map(r=>`${fmtTime(r.start)}–${fmtTime(r.end)}`).join(", ")}</b> (up to ${p(Math.max(...peak.map(s=>s.price)))})`;
+      // If the peak starts with the period, the pre-heat above already covers it
+      const covered = preheated && r0.start.getTime() === start.getTime();
+      html += pre && !covered ? `, and boost ${fmtTime(pre.start)}–${fmtTime(pre.end)} beforehand at ${p(pre.avg)}.` : covered ? " — the pre-heat carries you through." : ".";
+    }
+    items.push(`<div class="item">${html}</div>`);
+  }
+
+  // Cheapest heat overall (price ÷ efficiency) for any extra boost
+  const best = cheapestBlock(slots, Math.min(4, slots.length), s => s.price / cop(slotTemp(s)));
+  if (best) items.push(`<div class="item"><b class="t">💡 Cheapest heat: ${fmtDay(best.start)} ${fmtTime(best.start)}–${fmtTime(best.end)}</b>
+    ~${(best.score).toFixed(1)}p per kWh of heat (${p(best.avg)} electricity ÷ efficiency). Best time for any extra heating or a hot-water top-up.</div>`);
+
+  out.innerHTML = items.join("");
+}
 
 async function run(){
   $("status").textContent = "Loading prices and weather…";
@@ -525,7 +713,7 @@ async function run(){
     if (live && live.ok) await applyProfile(live.profile);
     renderLive(live, slots[0].price);
     const a = analyse(slots, weather);
-    LAST_SLOTS = slots; renderLoad();
+    LAST_SLOTS = slots; LAST_WEATHER = weather; renderLoad(); renderHp();
     const now = slots[0];
     $("stats").innerHTML = [
       ["Now", p(now.price), `${fmtTime(now.start)}–${fmtTime(now.end)}`],
@@ -571,7 +759,7 @@ const EDITED = new Set();
 $("settings").addEventListener("input", e => { if (e.target.name) EDITED.add(e.target.name); });
 $("refresh").addEventListener("click", run);
 
-fillForm(); run();
+fillForm(); initHp(); run();
 setInterval(run, 5*60e3);
 </script>
 </body>
