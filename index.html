@@ -143,10 +143,49 @@ function saveSettings(s){ try { localStorage.setItem("agileAdvisor", JSON.string
 let S = loadSettings();
 const $ = id => document.getElementById(id);
 
+// Settings that can come from SolaX. A value typed by hand is kept (S.manual[k]);
+// clearing the box goes back to the SolaX value.
+const AUTO_KEYS = { solarKwp:"pvCapacityKw", batteryKwh:"batteryCapacityKwh", chargeKw:"inverterRatedKw", dailyKwh:"avgDailyUseKwh" };
+let PROFILE = null;
+S.manual = S.manual || {};
+
 function fillForm(){
   const f = $("settings");
   for (const k of ["postcode","region","blockHours","cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) f.elements[k].value = S[k];
-  if (!S.postcode) $("settingsBox").open = true;
+  for (const k of Object.keys(AUTO_KEYS)){
+    const label = f.elements[k].parentElement;
+    let h = label.querySelector(".hint");
+    if (!h){ h = document.createElement("span"); h.className = "hint"; h.style.cssText = "font-size:12px;color:var(--accent)"; label.appendChild(h); }
+    const sv = PROFILE ? PROFILE[AUTO_KEYS[k]] : null;
+    h.textContent = sv === null || sv === undefined ? "" : S.manual[k] ? `Your value · SolaX says ${round1(sv)} (clear box to use it)` : "✓ From SolaX";
+  }
+  if (PROFILE && PROFILE.lat !== null && !S.postcode) f.elements.postcode.placeholder = "Using your SolaX system's location";
+  if (!S.postcode && !PROFILE) $("settingsBox").open = true;
+}
+const round1 = v => Math.round(v*10)/10;
+
+async function applyProfile(prof){
+  if (!prof) return;
+  PROFILE = prof;
+  let changed = false;
+  for (const [k, pk] of Object.entries(AUTO_KEYS)){
+    const v = prof[pk];
+    if (v === null || v === undefined || S.manual[k]) continue;
+    if (S[k] !== round1(v)){ S[k] = round1(v); changed = true; }
+  }
+  // Use the system's location for weather and region when no postcode is entered
+  if (!S.postcode && prof.lat !== null && prof.lon !== null && (S.lat !== prof.lat || S.lon !== prof.lon)){
+    S.lat = prof.lat; S.lon = prof.lon; changed = true;
+    try {
+      const pc = await fetch(`https://api.postcodes.io/postcodes?lon=${prof.lon}&lat=${prof.lat}&limit=1&radius=2000&widesearch=true`).then(r=>r.json());
+      if (pc.result && pc.result[0]){
+        const g = await lookupPostcode(pc.result[0].postcode);
+        if (g.region) S.region = g.region;
+      }
+    } catch {}
+  }
+  if (changed) saveSettings(S);
+  fillForm();
 }
 
 const fmtTime = d => d.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",timeZone:TZ});
@@ -384,6 +423,7 @@ async function run(){
     const [slots, weather, live] = await Promise.all([fetchPrices(S.region), fetchWeather(S.lat, S.lon), fetchLive()]);
     if (!slots.length) throw new Error("No upcoming prices returned");
     LIVE = live;
+    if (live && live.ok) await applyProfile(live.profile);
     renderLive(live, slots[0].price);
     const a = analyse(slots, weather);
     const now = slots[0];
@@ -405,8 +445,14 @@ async function run(){
 $("settings").addEventListener("submit", async ev=>{
   ev.preventDefault();
   const f = ev.target.elements;
-  const next = {...S};
+  const next = {...S, manual:{...S.manual}};
   for (const k of ["blockHours","cheap","solarKwp","batteryKwh","chargeKw","dailyKwh"]) next[k] = parseFloat(f[k].value)||0;
+  for (const [k, pk] of Object.entries(AUTO_KEYS)){
+    const typed = f[k].value.trim();
+    const sv = PROFILE ? PROFILE[pk] : null;
+    if (typed === "" && sv !== null && sv !== undefined){ next.manual[k] = false; next[k] = round1(sv); }
+    else if (typed !== "" && parseFloat(typed) !== S[k]) next.manual[k] = !(sv !== null && sv !== undefined && parseFloat(typed) === round1(sv));
+  }
   next.blockHours = next.blockHours || 3;
   next.region = f.region.value;
   const pc = f.postcode.value.trim();

@@ -146,10 +146,57 @@ async function fetchLive({ raw = false } = {}) {
   };
 }
 
+// ---------- System profile (used to pre-fill dashboard settings) ----------
+let profile = null, profileAt = 0;
+
+async function statMonth(plantId, ym) {
+  const t = await getToken();
+  const r = await fetch(`${BASE}/openapi/v2/plant/energy/get_stat_data`, {
+    method: "POST",
+    headers: { Authorization: `bearer ${t}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ plantId, dateType: 2, date: ym, businessType: BUSINESS_TYPE }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (j.code !== 10000) return [];
+  return (j.result && j.result.plantEnergyStatDataList) || [];
+}
+
+async function averageDailyUse(plantId) {
+  // Daily rows for this month and last; use the most recent 14 complete days
+  const now = new Date();
+  const ym = d => `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const rows = [...await statMonth(plantId, ym(prev)), ...await statMonth(plantId, ym(now))];
+  const vals = rows.map(r => num(r.loadConsumption)).filter(v => v !== null && v > 0);
+  // The last row is today (incomplete); drop it if this month returned rows
+  const complete = vals.length > 1 ? vals.slice(0, -1) : vals;
+  const recent = complete.slice(-14);
+  return recent.length ? recent.reduce((a, b) => a + b, 0) / recent.length : null;
+}
+
+async function getProfile() {
+  if (profile && Date.now() - profileAt < 6 * 3600e3) return profile;
+  const inv = await getInventory();
+  const pl = inv.plant;
+  const rated = sum(inv.inverters.map(d => num(d.ratedPower)));
+  const ratedKw = rated === null ? null : rated > 100 ? rated / 1000 : rated; // W or kW
+  const battRated = sum(inv.batteries.map(d => num(d.ratedCapacity)));
+  profile = {
+    pvCapacityKw: num(pl.pvCapacity),
+    batteryCapacityKwh: num(pl.batteryCapacity) || battRated,
+    inverterRatedKw: ratedKw,
+    avgDailyUseKwh: await averageDailyUse(pl.plantId).catch(() => null),
+    lat: num(pl.latitude), lon: num(pl.longitude),
+  };
+  profileAt = Date.now();
+  return profile;
+}
+
 async function getLive() {
   if (cache && Date.now() - cacheAt < CACHE_MS) return cache;
   if (!inflight) {
-    inflight = fetchLive()
+    inflight = Promise.all([fetchLive(), getProfile().catch(() => null)])
+      .then(([d, prof]) => { d.profile = prof; return d; })
       .then(d => { cache = { ...d, fetchedAt: new Date().toISOString() }; cacheAt = Date.now(); return cache; })
       .finally(() => { inflight = null; });
   }
