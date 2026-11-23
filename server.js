@@ -204,6 +204,105 @@ async function getLive() {
   return inflight;
 }
 
+// ---------- Today's energy, per half-hour, from SolaX history ----------
+// Returns kWh per half-hour since UK midnight so the page can price each one
+// at its Agile rate. Energy is split as: solar → house first, then → battery,
+// then → export; the grid covers the rest of the house and any grid charging.
+let today = null, todayAt = 0, todayInflight = null;
+const TODAY_CACHE_MS = 10 * 60 * 1000;
+
+// UK wall-clock offset (minutes) at a given instant
+function londonOffsetMin(d) {
+  const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(d);
+  const g = t => +parts.find(p => p.type === t).value;
+  const asUtc = Date.UTC(g("year"), g("month") - 1, g("day"), g("hour") % 24, g("minute"), g("second"));
+  return Math.round((asUtc - d.getTime()) / 60000);
+}
+function londonMidnight(now = new Date()) {
+  const off = londonOffsetMin(now);
+  const local = new Date(now.getTime() + off * 60000);
+  const mid = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate());
+  return new Date(mid - londonOffsetMin(new Date(mid)) * 60000);
+}
+// SolaX history times look like "2026-11-23 10:35:00" (plant local time) or ISO
+function parseSolaxTime(s) {
+  if (!s) return null;
+  if (/[zZ]|[+-]\d\d:?\d\d$/.test(s)) return new Date(s);
+  const asUtc = new Date(s.replace(" ", "T") + "Z");
+  if (isNaN(asUtc)) return null;
+  return new Date(asUtc.getTime() - londonOffsetMin(asUtc) * 60000);
+}
+
+async function history(params, startMs, endMs) {
+  const rows = [];
+  for (let a = startMs; a < endMs; a += 12 * 3600e3) {
+    const b = Math.min(a + 12 * 3600e3, endMs);
+    const r = await api("/openapi/v2/device/history_data", { ...params, businessType: BUSINESS_TYPE, startTime: a, endTime: b, timeInterval: 5 });
+    if (Array.isArray(r)) rows.push(...r);
+  }
+  return rows;
+}
+
+async function fetchToday() {
+  const inv = await getInventory();
+  const invSn = inv.inverters.map(d => d.deviceSn).filter(Boolean)[0];
+  if (!invSn) throw new SolaxError("No inverter found on this SolaX plant");
+  const start = londonMidnight(), end = new Date();
+  const battSn = inv.batteries.map(d => d.deviceSn).filter(Boolean)[0];
+  const [invRows, battRows] = await Promise.all([
+    history({ snList: invSn, deviceType: 1 }, start.getTime(), end.getTime()),
+    history(battSn ? { snList: battSn, deviceType: 2 } : { snList: invSn, deviceType: 2, requestSnType: 1 }, start.getTime(), end.getTime()).catch(() => []),
+  ]);
+
+  // Battery power by timestamp (to the minute)
+  const battAt = new Map();
+  for (const r of battRows) {
+    const t = parseSolaxTime(r.dataTime || r.plantLocalTime); const w = num(r.chargeDischargePower);
+    if (t && w !== null) battAt.set(Math.round(t.getTime() / 60000), w * BATT_SIGN);
+  }
+  const samples = invRows.map(r => ({ t: parseSolaxTime(r.dataTime || r.plantLocalTime), r }))
+    .filter(x => x.t && x.t >= start).sort((a, b) => a.t - b.t);
+
+  const buckets = new Map();
+  const keys = ["importKwh", "exportKwh", "pvKwh", "battChKwh", "battDisKwh", "loadKwh", "solarToLoadKwh", "solarToBattKwh", "gridToBattKwh"];
+  samples.forEach((s, i) => {
+    const next = samples[i + 1];
+    const mins = Math.min(15, Math.max(1, next ? (next.t - s.t) / 60000 : 5));
+    const h = mins / 60 / 1000; // W → kWh over this sample
+    const pv = Math.max(0, pvPower(s.r) || 0);
+    const grid = (num(s.r.gridPower) ?? 0) * GRID_SIGN;        // + export, − import
+    const minute = Math.round(s.t.getTime() / 60000);
+    const batt = battAt.get(minute) ?? battAt.get(minute - 1) ?? battAt.get(minute + 1) ?? 0; // + charge
+    const load = Math.max(0, pv - batt - grid);
+    const ch = Math.max(0, batt), dis = Math.max(0, -batt);
+    const s2l = Math.min(pv, load), s2b = Math.min(pv - s2l, ch);
+    const slotStart = Math.floor(s.t.getTime() / 1800e3) * 1800e3;
+    const b = buckets.get(slotStart) || Object.fromEntries(keys.map(k => [k, 0]));
+    b.importKwh += Math.max(0, -grid) * h; b.exportKwh += Math.max(0, grid) * h;
+    b.pvKwh += pv * h; b.battChKwh += ch * h; b.battDisKwh += dis * h; b.loadKwh += load * h;
+    b.solarToLoadKwh += s2l * h; b.solarToBattKwh += s2b * h; b.gridToBattKwh += (ch - s2b) * h;
+    buckets.set(slotStart, b);
+  });
+
+  return {
+    ok: true,
+    from: start.toISOString(),
+    samples: samples.length,
+    slots: [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([t, b]) => ({ start: new Date(t).toISOString(), ...b })),
+  };
+}
+
+async function getToday() {
+  if (today && Date.now() - todayAt < TODAY_CACHE_MS) return today;
+  if (!todayInflight) {
+    todayInflight = fetchToday()
+      .then(d => { today = d; todayAt = Date.now(); return d; })
+      .finally(() => { todayInflight = null; });
+  }
+  return todayInflight;
+}
+
 // ---------- HTTP ----------
 function send(res, status, body, type = "application/json") {
   res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" });
@@ -233,9 +332,23 @@ const server = http.createServer(async (req, res) => {
     try { return send(res, 200, await getLive()); }
     catch (e) { console.error(e); return send(res, 200, { ok: false, configured: true, error: e.message }); }
   }
+  if (url.pathname === "/api/solax/today") {
+    if (!CLIENT_ID || !CLIENT_SECRET) return send(res, 200, { ok: false, configured: false });
+    try { return send(res, 200, await getToday()); }
+    catch (e) { console.error(e); return send(res, 200, { ok: false, configured: true, error: e.message }); }
+  }
   if (url.pathname === "/api/solax/raw") {
     if (!CLIENT_ID || !CLIENT_SECRET) return send(res, 200, { ok: false, configured: false });
-    try { return send(res, 200, await fetchLive({ raw: true })); }
+    try {
+      const raw = await fetchLive({ raw: true });
+      const invSn = raw.inventory.inverters.map(d => d.deviceSn).filter(Boolean)[0];
+      const end = Date.now(), start = end - 30 * 60e3;
+      raw.historySample = {
+        inverter: await history({ snList: invSn, deviceType: 1 }, start, end).then(r => r.slice(0, 3)).catch(e => ({ error: e.message })),
+        battery: await history({ snList: invSn, deviceType: 2, requestSnType: 1 }, start, end).then(r => r.slice(0, 3)).catch(e => ({ error: e.message })),
+      };
+      return send(res, 200, raw);
+    }
     catch (e) { return send(res, 200, { ok: false, error: e.message }); }
   }
 

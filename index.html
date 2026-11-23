@@ -44,6 +44,9 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
 .presets{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .presets button{padding:5px 10px;font-weight:500}
 .presets button.active{background:var(--accent);color:#fff}
+.toggle{display:inline-flex;border:1px solid var(--accent);border-radius:8px;overflow:hidden}
+.toggle button{background:transparent;color:var(--accent);border:0;border-radius:0;padding:5px 12px;font-weight:600}
+.toggle button.on{background:var(--accent);color:#fff}
 .hp-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}
 .hp-row input{width:auto}
 .hp-row button{padding:4px 10px}
@@ -109,6 +112,18 @@ th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-
     <h2>Live system <span class="muted" id="liveMeta" style="font-weight:400;font-size:13px"></span></h2>
     <div class="grid" id="live"></div>
     <div class="muted" id="liveToday" style="margin-top:10px;font-size:13px"></div>
+  </section>
+
+  <section class="card" id="costCard" hidden>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <h2 style="margin:0">Today's costs &amp; savings</h2>
+      <div class="toggle" id="costUnit" role="group" aria-label="Show in">
+        <button type="button" data-u="money">£ / p</button><button type="button" data-u="kwh">kWh</button>
+      </div>
+    </div>
+    <div class="grid" id="costTiles"></div>
+    <div id="costSummary" style="margin-top:10px"></div>
+    <div class="muted" id="costNote" style="margin-top:8px;font-size:12px"></div>
   </section>
 
   <section class="grid" id="stats"></section>
@@ -571,6 +586,88 @@ $("presets").addEventListener("click", e => {
 });
 showSelected();
 
+// ---------- Today's costs & savings ----------
+let TODAY = null; // { energy slots from /api/solax/today, prices }
+const money = pence => Math.abs(pence) < 100 ? `${Math.round(pence)}p` : `£${(pence/100).toFixed(2)}`;
+const kwhTxt = v => `${v.toFixed(1)} kWh`;
+
+async function fetchToday(region){
+  if (location.protocol === "file:") return null;
+  const [energy, prices] = await Promise.all([
+    fetch("api/solax/today",{cache:"no-store"}).then(r=>r.json()).catch(()=>null),
+    (async () => {
+      const from = new Date(Date.now() - 25*3600e3), to = new Date(Date.now() + 3600e3);
+      const url = `https://api.octopus.energy/v1/products/${PRODUCT}/electricity-tariffs/E-1R-${PRODUCT}-${region}/standard-unit-rates/?period_from=${from.toISOString()}&period_to=${to.toISOString()}&page_size=200`;
+      const j = await fetch(url).then(r=>r.json());
+      return new Map(j.results.map(r => [new Date(r.valid_from).getTime(), r.value_inc_vat]));
+    })().catch(()=>null),
+  ]);
+  if (!energy || !energy.ok || !prices) return energy && !energy.ok ? energy : null;
+  return { energy, prices };
+}
+
+function costTotals(T){
+  const t = { importKwh:0, importP:0, loadKwh:0, loadP:0, s2lKwh:0, s2lP:0, s2bKwh:0, battChKwh:0,
+              gridToBattKwh:0, gridToBattP:0, disKwh:0, disP:0, exportKwh:0, pvKwh:0, minPrice:Infinity, priced:0 };
+  for (const e of T.energy.slots){
+    const pr = T.prices.get(new Date(e.start).getTime());
+    if (pr === undefined) continue;
+    t.priced++; t.minPrice = Math.min(t.minPrice, pr);
+    t.importKwh += e.importKwh; t.importP += e.importKwh*pr;
+    t.loadKwh += e.loadKwh; t.loadP += e.loadKwh*pr;
+    t.s2lKwh += e.solarToLoadKwh; t.s2lP += e.solarToLoadKwh*pr;
+    t.s2bKwh += e.solarToBattKwh; t.battChKwh += e.battChKwh;
+    t.gridToBattKwh += e.gridToBattKwh; t.gridToBattP += e.gridToBattKwh*pr;
+    t.disKwh += e.battDisKwh; t.disP += e.battDisKwh*pr;
+    t.exportKwh += e.exportKwh; t.pvKwh += e.pvKwh;
+  }
+  // Share of today's battery energy that came from solar (the rest came from the grid)
+  const f = t.battChKwh > 0 ? t.s2bKwh / t.battChKwh : 0;
+  const ETA = 0.9; // battery round-trip efficiency
+  const chargePrice = t.gridToBattKwh > 0.05 ? t.gridToBattP / t.gridToBattKwh : (isFinite(t.minPrice) ? t.minPrice : 0);
+  t.solarViaBattKwh = t.disKwh * f;
+  t.solarKwh = t.s2lKwh + t.solarViaBattKwh;
+  t.solarP = t.s2lP + t.disP * f;
+  t.battShiftKwh = t.disKwh * (1 - f);
+  t.battUsedAvg = t.disKwh > 0 ? t.disP / t.disKwh : 0;
+  t.chargePrice = chargePrice;
+  t.battP = t.disP * (1 - f) - t.battShiftKwh * chargePrice / ETA;
+  return t;
+}
+
+function renderCost(){
+  const card = $("costCard");
+  if (!TODAY || !TODAY.energy){ card.hidden = !(TODAY && TODAY.ok === false && TODAY.configured); if (!card.hidden) $("costTiles").innerHTML = `<span class="err">Couldn't read today's history from SolaX: ${TODAY.error}</span>`; return; }
+  card.hidden = false;
+  const unit = S.costUnit || "money";
+  document.querySelectorAll("#costUnit button").forEach(b => b.classList.toggle("on", b.dataset.u === unit));
+  const t = costTotals(TODAY);
+  if (!t.priced){ $("costTiles").innerHTML = `<span class="muted">No SolaX history for today yet.</span>`; $("costSummary").innerHTML = ""; return; }
+  const m = unit === "money";
+  const avgImp = t.importKwh > 0 ? t.importP / t.importKwh : 0;
+  const tiles = m ? [
+    ["🔌 Imported today", money(t.importP), `${kwhTxt(t.importKwh)} at avg ${p(avgImp)}` + (t.gridToBattKwh > 0.5 ? ` — includes ${kwhTxt(t.gridToBattKwh)} stored in the battery for later` : "")],
+    ["☀️ Saved by solar", money(t.solarP), `${kwhTxt(t.solarKwh)} of your own solar used`],
+    ["🔋 Saved by battery", money(t.battP), t.battShiftKwh > 0.05 ? `charged at ~${p(t.chargePrice)}, used at ~${p(t.battUsedAvg)}` : "no grid-charged energy used yet"],
+  ] : [
+    ["🔌 Imported today", kwhTxt(t.importKwh), `avg ${p(avgImp)}/kWh` + (t.gridToBattKwh > 0.5 ? ` — ${kwhTxt(t.gridToBattKwh)} went into the battery` : "")],
+    ["☀️ Solar used", kwhTxt(t.solarKwh), `${kwhTxt(t.s2lKwh)} direct + ${kwhTxt(t.solarViaBattKwh)} via battery`],
+    ["🔋 Battery shifted", kwhTxt(t.battShiftKwh), `cheap grid energy used later (${kwhTxt(t.disKwh)} discharged in total)`],
+  ];
+  $("costTiles").innerHTML = tiles.map(([l,v,s])=>`<div class="stat"><div class="l">${l}</div><div class="v">${v}</div><div class="muted">${s}</div></div>`).join("");
+  const saved = t.solarP + t.battP;
+  $("costSummary").innerHTML = m
+    ? `Without solar or battery, today's ${kwhTxt(t.loadKwh)} would have cost <b>${money(t.loadP)}</b>. You've saved <b class="save">${money(saved)}</b>${t.loadP>0?` (${Math.round(saved/t.loadP*100)}%)`:""} so far.`
+    : `House used <b>${kwhTxt(t.loadKwh)}</b> today: ${kwhTxt(t.solarKwh)} from solar, ${kwhTxt(t.battShiftKwh)} from battery (grid-charged), the rest from the grid. Solar generated ${kwhTxt(t.pvKwh)}, exported ${kwhTxt(t.exportKwh)}.`;
+  const solaxImp = LIVE && LIVE.ok && LIVE.today ? LIVE.today.importKwh : null;
+  $("costNote").textContent = `Since midnight, from SolaX 5-minute readings priced at each half-hour's Agile rate (inc. VAT, excludes standing charge). Battery saving allows ~10% storage loss.`
+    + (solaxImp !== null && Math.abs(solaxImp - t.importKwh) > Math.max(1, solaxImp*0.1) ? ` Note: SolaX's own import total is ${kwhTxt(solaxImp)}, which differs from these readings.` : "");
+}
+$("costUnit").addEventListener("click", e => {
+  const b = e.target.closest("button[data-u]"); if (!b) return;
+  S.costUnit = b.dataset.u; saveSettings(S); renderCost();
+});
+
 // ---------- Heat pump plan ----------
 let LAST_WEATHER = [];
 const HP_DEFAULT = { heatKw:"", dhwHours:1, dhwReadyBy:"07:00", preheatHours:2,
@@ -712,6 +809,7 @@ async function run(){
     LIVE = live;
     if (live && live.ok) await applyProfile(live.profile);
     renderLive(live, slots[0].price);
+    if (live && live.ok){ TODAY = await fetchToday(S.region); renderCost(); }
     const a = analyse(slots, weather);
     LAST_SLOTS = slots; LAST_WEATHER = weather; renderLoad(); renderHp();
     const now = slots[0];
